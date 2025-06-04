@@ -1,16 +1,20 @@
 """
-Custom image canvas widget for displaying, painting, and cropping images.
+Custom image canvas widget for displaying, painting, and cropping images with zoom support.
 """
 
 from PySide6.QtWidgets import QWidget, QSizePolicy
-from PySide6.QtCore import Qt, QSize, QPoint, QRect
+from PySide6.QtCore import Qt, QSize, QPoint, QRect, Signal, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QCursor
 
-from config import CROP_HANDLE_SIZE, MIN_CROP_SIZE
+from config import (CROP_HANDLE_SIZE, MIN_CROP_SIZE, DEFAULT_ZOOM_FACTOR, 
+                   MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR, MOUSE_WHEEL_ZOOM_STEP)
 
 
 class ImageCanvas(QWidget):
-    """Custom widget for displaying and painting on images"""
+    """Custom widget for displaying and painting on images with zoom support"""
+    
+    # Signal emitted when zoom level changes
+    zoom_changed = Signal(float)
     
     def __init__(self):
         super().__init__()
@@ -36,9 +40,11 @@ class ImageCanvas(QWidget):
         self.handle_size = CROP_HANDLE_SIZE
         self.handle_hover = None  # Which handle is being hovered
         
-        # Image positioning
+        # Image positioning and zoom
         self.image_rect = None
-        self.scale_factor = 1.0
+        self.fit_scale_factor = 1.0  # Scale to fit widget
+        self.zoom_factor = DEFAULT_ZOOM_FACTOR  # User zoom level
+        self.scale_factor = 1.0  # Combined scale factor
         
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -57,12 +63,15 @@ class ImageCanvas(QWidget):
         try:
             self.image_pixmap = QPixmap(str(image_path))
             if not self.image_pixmap.isNull():
+                # Reset zoom when loading new image
+                self.zoom_factor = DEFAULT_ZOOM_FACTOR
                 self.update_display()
                 # Create a new paint overlay for this image
                 self.paint_overlay = QPixmap(self.image_pixmap.size())
                 self.paint_overlay.fill(Qt.transparent)
                 self.has_painted = False  # Reset paint flag for new image
                 self.clear_crop_selection()  # Clear any crop selection
+                self.zoom_changed.emit(self.zoom_factor)
                 return True
             else:
                 self._clear_image_data()
@@ -77,35 +86,169 @@ class ImageCanvas(QWidget):
         self.image_pixmap = None
         self.paint_overlay = None
         self.has_painted = False
+        self.zoom_factor = DEFAULT_ZOOM_FACTOR
         self.clear_crop_selection()
         self.update()
+    
+    def zoom_in(self):
+        """Zoom in by one step"""
+        if not self.image_pixmap:
+            return
+        
+        # Use smaller increments for more controlled zooming
+        if self.zoom_factor < 1.0:
+            # Below 100%, use 0.1 increments
+            new_zoom = min(1.0, self.zoom_factor + 0.1)
+        else:
+            # Above 100%, use 0.25 increments
+            new_zoom = min(MAX_ZOOM_FACTOR, self.zoom_factor + 0.25)
+        
+        self.set_zoom(new_zoom)
+    
+    def zoom_out(self):
+        """Zoom out by one step"""
+        if not self.image_pixmap:
+            return
+        
+        # Use smaller increments for more controlled zooming
+        if self.zoom_factor <= 1.0:
+            # At or below 100%, use 0.1 increments
+            new_zoom = max(MIN_ZOOM_FACTOR, self.zoom_factor - 0.1)
+        else:
+            # Above 100%, use 0.25 increments
+            new_zoom = max(1.0, self.zoom_factor - 0.25)
+        
+        self.set_zoom(new_zoom)
+    
+    def reset_zoom(self):
+        """Reset zoom to 100%"""
+        if not self.image_pixmap:
+            return
+        self.set_zoom(DEFAULT_ZOOM_FACTOR)
+    
+    def fit_to_window(self):
+        """Set zoom to fit image in window"""
+        if not self.image_pixmap:
+            return
+        
+        # Get the scroll area size if we're in one
+        parent_scroll = self.parent()
+        if hasattr(parent_scroll, 'viewport'):
+            viewport_size = parent_scroll.viewport().size()
+            available_width = max(viewport_size.width() - 40, 100)
+            available_height = max(viewport_size.height() - 40, 100)
+        else:
+            widget_size = self.size()
+            available_width = max(widget_size.width() - 40, 100)
+            available_height = max(widget_size.height() - 40, 100)
+        
+        # Calculate what zoom level would fit the image perfectly
+        fit_zoom = min(
+            available_width / self.image_pixmap.width(),
+            available_height / self.image_pixmap.height()
+        )
+        
+        # Set this as the zoom level
+        self.set_zoom(fit_zoom)
+    
+    def set_zoom(self, zoom_factor):
+        """Set zoom factor and update display"""
+        if not self.image_pixmap:
+            return
+            
+        # Clamp zoom factor to safe bounds
+        self.zoom_factor = max(MIN_ZOOM_FACTOR, min(MAX_ZOOM_FACTOR, zoom_factor))
+        
+        # Only update display if zoom actually changed
+        self.update_display()
+        self.zoom_changed.emit(self.zoom_factor)
+    
+    def get_zoom_percentage(self):
+        """Get current zoom as percentage"""
+        return int(self.zoom_factor * 100)
     
     def update_display(self):
         """Update the scaled display of the image"""
         if not self.image_pixmap:
             return
             
-        # Calculate scaling to fit widget while maintaining aspect ratio
-        widget_size = self.size()
-        available_width = max(widget_size.width() - 20, 100)
-        available_height = max(widget_size.height() - 20, 100)
+        # Get the scroll area size if we're in one
+        parent_scroll = self.parent()
+        if hasattr(parent_scroll, 'viewport'):
+            viewport_size = parent_scroll.viewport().size()
+            available_width = max(viewport_size.width() - 40, 100)
+            available_height = max(viewport_size.height() - 40, 100)
+        else:
+            widget_size = self.size()
+            available_width = max(widget_size.width() - 40, 100)
+            available_height = max(widget_size.height() - 40, 100)
         
-        self.scale_factor = min(
+        # Calculate what scale would fit the image in the available space
+        self.fit_scale_factor = min(
             available_width / self.image_pixmap.width(),
             available_height / self.image_pixmap.height()
         )
         
-        scaled_size = QSize(
-            int(self.image_pixmap.width() * self.scale_factor),
-            int(self.image_pixmap.height() * self.scale_factor)
-        )
+        # The actual scale factor depends on zoom mode:
+        # - zoom_factor = 1.0 means actual size (100%)
+        # - zoom_factor < 1.0 means smaller than actual size
+        # - zoom_factor > 1.0 means larger than actual size
+        
+        if self.zoom_factor <= 1.0:
+            # For zoom <= 100%, use fit scale as maximum, zoom as multiplier
+            self.scale_factor = min(self.fit_scale_factor, self.zoom_factor)
+        else:
+            # For zoom > 100%, use zoom directly (ignoring fit scale)
+            self.scale_factor = self.zoom_factor
+        
+        # Calculate final image size
+        final_width = int(self.image_pixmap.width() * self.scale_factor)
+        final_height = int(self.image_pixmap.height() * self.scale_factor)
+        
+        # Set minimum size for scroll area to work properly
+        min_width = max(final_width + 40, 400)
+        min_height = max(final_height + 40, 300)
+        self.setMinimumSize(min_width, min_height)
         
         # Calculate image position (centered)
-        x = (widget_size.width() - scaled_size.width()) // 2
-        y = (widget_size.height() - scaled_size.height()) // 2
-        self.image_rect = (x, y, scaled_size.width(), scaled_size.height())
+        widget_size = self.size()
+        x = max((widget_size.width() - final_width) // 2, 20)
+        y = max((widget_size.height() - final_height) // 2, 20)
+            
+        self.image_rect = (x, y, final_width, final_height)
         
         self.update()
+    
+    def wheelEvent(self, event):
+        """Handle mouse wheel for zooming"""
+        if not self.image_pixmap:
+            super().wheelEvent(event)
+            return
+            
+        # Check if Ctrl is pressed for zoom
+        if event.modifiers() & Qt.ControlModifier:
+            try:
+                # Zoom in/out based on wheel direction
+                angle_delta = event.angleDelta().y()
+                
+                # Use smaller increments for mouse wheel
+                zoom_step = 0.05  # 5% increments for smooth mouse wheel zooming
+                
+                if angle_delta > 0:
+                    # Zoom in
+                    new_zoom = min(MAX_ZOOM_FACTOR, self.zoom_factor + zoom_step)
+                else:
+                    # Zoom out
+                    new_zoom = max(MIN_ZOOM_FACTOR, self.zoom_factor - zoom_step)
+                
+                self.set_zoom(new_zoom)
+                event.accept()
+            except Exception as e:
+                print(f"Zoom error: {e}")
+                super().wheelEvent(event)
+        else:
+            # Pass to parent for scrolling
+            super().wheelEvent(event)
     
     def paintEvent(self, event):
         """Custom paint event to draw image and paint overlay"""
@@ -121,11 +264,7 @@ class ImageCanvas(QWidget):
                 Qt.SmoothTransformation
             )
             
-            # Calculate centered position
-            x = (self.width() - scaled_image.width()) // 2
-            y = (self.height() - scaled_image.height()) // 2
-            self.image_rect = (x, y, scaled_image.width(), scaled_image.height())
-            
+            x, y, w, h = self.image_rect
             painter.drawPixmap(x, y, scaled_image)
             
             # Draw paint overlay if it exists
@@ -255,8 +394,16 @@ class ImageCanvas(QWidget):
     def resizeEvent(self, event):
         """Handle widget resize"""
         super().resizeEvent(event)
-        if self.image_pixmap:
-            self.update_display()
+        # Only update display if we have an image and the resize was significant
+        if self.image_pixmap and event.size() != event.oldSize():
+            # Use a small delay to prevent rapid resize events from causing issues
+            if not hasattr(self, '_resize_timer'):
+                self._resize_timer = QTimer()
+                self._resize_timer.setSingleShot(True)
+                self._resize_timer.timeout.connect(self.update_display)
+            
+            self._resize_timer.stop()
+            self._resize_timer.start(50)  # 50ms delay
     
     def mousePressEvent(self, event):
         """Handle mouse press for painting, cropping, or color picking"""
@@ -517,41 +664,49 @@ class ImageCanvas(QWidget):
     
     def screen_to_image_coords(self, screen_point):
         """Convert screen coordinates to image coordinates"""
-        if not self.image_rect:
+        if not self.image_rect or not self.image_pixmap or self.scale_factor <= 0:
             return None
             
         x, y, w, h = self.image_rect
+        
+        # Check if point is within the displayed image bounds
+        if not (x <= screen_point.x() <= x + w and y <= screen_point.y() <= y + h):
+            return None
         
         # Calculate relative position within the displayed image
         rel_x = screen_point.x() - x
         rel_y = screen_point.y() - y
         
-        # Convert to original image coordinates
-        if self.scale_factor > 0:
+        # Convert to original image coordinates with bounds checking
+        try:
             orig_x = int(rel_x / self.scale_factor)
             orig_y = int(rel_y / self.scale_factor)
             
             # Ensure coordinates are within image bounds
-            if (0 <= orig_x < self.image_pixmap.width() and 
-                0 <= orig_y < self.image_pixmap.height()):
-                return QPoint(orig_x, orig_y)
-        
-        return None
+            orig_x = max(0, min(orig_x, self.image_pixmap.width() - 1))
+            orig_y = max(0, min(orig_y, self.image_pixmap.height() - 1))
+            
+            return QPoint(orig_x, orig_y)
+        except (ZeroDivisionError, OverflowError):
+            return None
     
     def image_to_screen_rect(self, image_rect):
         """Convert image rectangle to screen coordinates"""
-        if not self.image_rect or not image_rect.isValid():
+        if not self.image_rect or not image_rect.isValid() or self.scale_factor <= 0:
             return QRect()
         
         x, y, w, h = self.image_rect
         
-        # Convert image coordinates to screen coordinates
-        screen_x = x + int(image_rect.x() * self.scale_factor)
-        screen_y = y + int(image_rect.y() * self.scale_factor)
-        screen_w = int(image_rect.width() * self.scale_factor)
-        screen_h = int(image_rect.height() * self.scale_factor)
-        
-        return QRect(screen_x, screen_y, screen_w, screen_h)
+        try:
+            # Convert image coordinates to screen coordinates
+            screen_x = x + int(image_rect.x() * self.scale_factor)
+            screen_y = y + int(image_rect.y() * self.scale_factor)
+            screen_w = int(image_rect.width() * self.scale_factor)
+            screen_h = int(image_rect.height() * self.scale_factor)
+            
+            return QRect(screen_x, screen_y, screen_w, screen_h)
+        except (OverflowError, ValueError):
+            return QRect()
     
     def pick_color(self, point):
         """Pick color from the image at the given point"""

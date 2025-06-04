@@ -1,5 +1,5 @@
 """
-Main window for the Image Tag Editor application.
+Main window for the Image Tag Editor application with zoom functionality.
 """
 
 from pathlib import Path
@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QLabel, QTextEdit, QPushButton, QFileDialog,
     QSplitter, QMessageBox, QListWidgetItem, QColorDialog,
-    QSlider, QFrame, QApplication
+    QSlider, QFrame, QApplication, QScrollArea
 )
 from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtGui import QFont, QAction, QTextOption, QColor
@@ -42,7 +42,7 @@ class ImageTagEditor(QMainWindow):
             QTimer.singleShot(100, lambda: self.open_folder_path(initial_folder))
         
     def init_ui(self):
-        self.setWindowTitle("Image Tag Editor with Paint and Crop Tools")
+        self.setWindowTitle("Image Tag Editor with Paint, Crop and Zoom Tools")
         self.setGeometry(100, 100, 1400, 900)
         
         # Create central widget and main layout
@@ -97,6 +97,29 @@ class ImageTagEditor(QMainWindow):
         crop_action.triggered.connect(self.apply_crop)
         edit_menu.addAction(crop_action)
         
+        # View menu
+        view_menu = menubar.addMenu('View')
+        
+        zoom_in_action = QAction('Zoom In', self)
+        zoom_in_action.setShortcut('Ctrl++')
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction('Zoom Out', self)
+        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+        
+        reset_zoom_action = QAction('Reset Zoom', self)
+        reset_zoom_action.setShortcut('Ctrl+0')
+        reset_zoom_action.triggered.connect(self.reset_zoom)
+        view_menu.addAction(reset_zoom_action)
+        
+        fit_window_action = QAction('Fit to Window', self)
+        fit_window_action.setShortcut('Ctrl+F')
+        fit_window_action.triggered.connect(self.fit_to_window)
+        view_menu.addAction(fit_window_action)
+        
     def create_left_panel(self, parent):
         # Left panel container
         left_widget = QWidget()
@@ -126,14 +149,22 @@ class ImageTagEditor(QMainWindow):
         right_layout.setContentsMargins(5, 5, 5, 5)
         right_layout.setSpacing(5)
         
-        # Paint tools section
-        self.create_paint_tools(right_layout)
+        # Create scroll area for image display
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
         
         # Image display area (custom canvas)
         self.image_canvas = ImageCanvas()
-        right_layout.addWidget(self.image_canvas)
+        self.scroll_area.setWidget(self.image_canvas)
+        right_layout.addWidget(self.scroll_area)
         
-        # Tags section
+        # Paint tools section - moved between image and tags
+        self.create_paint_tools(right_layout)
+        
+        # Tags section - moved to bottom
         self.create_tags_section(right_layout)
         
         parent.addWidget(right_widget)
@@ -189,6 +220,10 @@ class ImageTagEditor(QMainWindow):
         # Second row of tools
         row2_layout = QHBoxLayout()
         self.create_action_buttons(row2_layout)
+        
+        # Add zoom controls to second row
+        self.create_zoom_controls(row2_layout)
+        
         row2_layout.addStretch()  # Push everything to the left
         
         tools_layout.addLayout(row1_layout)
@@ -234,6 +269,57 @@ class ImageTagEditor(QMainWindow):
         self.cancel_crop_btn.setEnabled(False)
         self.cancel_crop_btn.setToolTip("Cancel crop selection")
         layout.addWidget(self.cancel_crop_btn)
+    
+    def create_zoom_controls(self, layout):
+        """Create zoom controls"""
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.VLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(separator)
+        
+        # Zoom label
+        zoom_label = QLabel("Zoom:")
+        layout.addWidget(zoom_label)
+        
+        # Zoom out button
+        self.zoom_out_btn = QPushButton("−")  # minus sign
+        self.zoom_out_btn.setFixedSize(30, 30)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        self.zoom_out_btn.setToolTip("Zoom out (Ctrl+-)")
+        self.zoom_out_btn.setEnabled(False)  # Initially disabled
+        layout.addWidget(self.zoom_out_btn)
+        
+        # Zoom percentage display
+        self.zoom_label = QLabel("—")  # Em dash for no image
+        self.zoom_label.setMinimumWidth(50)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        self.zoom_label.setStyleSheet("border: 1px solid #666; padding: 2px;")
+        layout.addWidget(self.zoom_label)
+        
+        # Zoom in button
+        self.zoom_in_btn = QPushButton("+")  # plus sign
+        self.zoom_in_btn.setFixedSize(30, 30)
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.zoom_in_btn.setToolTip("Zoom in (Ctrl++)")
+        self.zoom_in_btn.setEnabled(False)  # Initially disabled
+        layout.addWidget(self.zoom_in_btn)
+        
+        # Reset zoom button
+        self.reset_zoom_btn = QPushButton("1:1")
+        self.reset_zoom_btn.setFixedSize(35, 30)
+        self.reset_zoom_btn.clicked.connect(self.reset_zoom)
+        self.reset_zoom_btn.setToolTip("Reset zoom to 100% (Ctrl+0)")
+        self.reset_zoom_btn.setEnabled(False)  # Initially disabled
+        layout.addWidget(self.reset_zoom_btn)
+        
+        # Fit to window button
+        self.fit_window_btn = QPushButton("Fit")
+        self.fit_window_btn.setFixedSize(35, 30)
+        self.fit_window_btn.clicked.connect(self.fit_to_window)
+        self.fit_window_btn.setToolTip("Fit image to window (Ctrl+F)")
+        self.fit_window_btn.setEnabled(False)  # Initially disabled
+        layout.addWidget(self.fit_window_btn)
     
     def create_tags_section(self, layout):
         """Create the tags editing section"""
@@ -346,12 +432,52 @@ class ImageTagEditor(QMainWindow):
         """Clear all paint marks"""
         self.image_canvas.clear_paint()
         self.statusBar().showMessage("Paint marks cleared")
+    
+    # Zoom-related methods
+    def zoom_in(self):
+        """Zoom in on the image"""
+        if self.image_canvas and self.image_canvas.image_pixmap:
+            self.image_canvas.zoom_in()
+    
+    def zoom_out(self):
+        """Zoom out on the image"""
+        if self.image_canvas and self.image_canvas.image_pixmap:
+            self.image_canvas.zoom_out()
+    
+    def reset_zoom(self):
+        """Reset zoom to 100%"""
+        if self.image_canvas and self.image_canvas.image_pixmap:
+            self.image_canvas.reset_zoom()
+    
+    def fit_to_window(self):
+        """Fit image to window"""
+        if self.image_canvas and self.image_canvas.image_pixmap:
+            self.image_canvas.fit_to_window()
+    
+    def update_zoom_display(self, zoom_factor):
+        """Update zoom percentage display"""
+        try:
+            percentage = int(zoom_factor * 100)
+            self.zoom_label.setText(f"{percentage}%")
+            
+            # Update status message
+            if hasattr(self, 'current_image_path') and self.current_image_path:
+                current_row = self.image_list.currentRow()
+                total_count = self.image_list.count()
+                self.statusBar().showMessage(
+                    f"Image {current_row + 1} of {total_count}: {self.current_image_path.name} - Zoom: {percentage}%"
+                )
+        except Exception as e:
+            print(f"Error updating zoom display: {e}")
         
     def setup_connections(self):
         self.image_list.itemClicked.connect(self.on_image_selected)
         self.tags_edit.textChanged.connect(self.on_tags_changed)
         self.tags_edit.textChanged.connect(self.auto_resize_text_edit)
-    
+        
+        # Connect zoom signal
+        self.image_canvas.zoom_changed.connect(self.update_zoom_display)
+        
     def open_folder(self):
         """Open folder dialog and load selected folder"""
         folder_path = QFileDialog.getExistingDirectory(
@@ -407,7 +533,7 @@ class ImageTagEditor(QMainWindow):
             
         if image_files:
             QTimer.singleShot(3000, lambda: self.statusBar().showMessage(
-                f"Found {len(image_files)} image files - Use ↑/↓ keys to navigate"
+                f"Found {len(image_files)} image files - Use ↑/↓ keys to navigate, Ctrl+wheel to zoom"
             ))
         
     def on_image_selected(self, item):
@@ -418,7 +544,11 @@ class ImageTagEditor(QMainWindow):
         success = self.image_canvas.set_image(image_path)
         if not success:
             self.statusBar().showMessage(f"Failed to load image: {image_path.name}")
+            self._disable_zoom_controls()
             return
+        
+        # Enable zoom controls
+        self._enable_zoom_controls()
         
         # Reset crop mode when switching images
         if self.crop_btn.isChecked():
@@ -432,10 +562,28 @@ class ImageTagEditor(QMainWindow):
         self.tags_edit.setEnabled(True)
         self.save_tags_btn.setEnabled(True)
         
-        # Update status bar with position info
+        # Update status bar with position and zoom info
         current_row = self.image_list.currentRow()
         total_count = self.image_list.count()
-        self.statusBar().showMessage(f"Image {current_row + 1} of {total_count}: {image_path.name}")
+        zoom_percentage = self.image_canvas.get_zoom_percentage()
+        self.statusBar().showMessage(
+            f"Image {current_row + 1} of {total_count}: {image_path.name} - Zoom: {zoom_percentage}%"
+        )
+    
+    def _enable_zoom_controls(self):
+        """Enable zoom controls when image is loaded"""
+        self.zoom_in_btn.setEnabled(True)
+        self.zoom_out_btn.setEnabled(True)
+        self.reset_zoom_btn.setEnabled(True)
+        self.fit_window_btn.setEnabled(True)
+    
+    def _disable_zoom_controls(self):
+        """Disable zoom controls when no image is loaded"""
+        self.zoom_in_btn.setEnabled(False)
+        self.zoom_out_btn.setEnabled(False)
+        self.reset_zoom_btn.setEnabled(False)
+        self.fit_window_btn.setEnabled(False)
+        self.zoom_label.setText("—")
             
     def auto_resize_text_edit(self):
         """Auto-resize the text edit based on content"""
