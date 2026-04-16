@@ -3,6 +3,7 @@ Main window for the Image Tag Editor application with zoom functionality.
 """
 
 from pathlib import Path
+import shutil
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QLabel, QTextEdit, QPushButton, QFileDialog,
@@ -96,6 +97,16 @@ class ImageTagEditor(QMainWindow):
         crop_action.setShortcut('Ctrl+R')
         crop_action.triggered.connect(self.apply_crop)
         edit_menu.addAction(crop_action)
+
+        delete_action = QAction('Delete Image', self)
+        delete_action.setShortcut('Delete')
+        delete_action.triggered.connect(self.delete_image)
+        edit_menu.addAction(delete_action)
+
+        duplicate_action = QAction('Duplicate Image', self)
+        duplicate_action.setShortcut('Ctrl+D')
+        duplicate_action.triggered.connect(self.duplicate_image)
+        edit_menu.addAction(duplicate_action)
         
         # View menu
         view_menu = menubar.addMenu('View')
@@ -149,17 +160,9 @@ class ImageTagEditor(QMainWindow):
         right_layout.setContentsMargins(5, 5, 5, 5)
         right_layout.setSpacing(5)
         
-        # Create scroll area for image display
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setAlignment(Qt.AlignCenter)
-        
-        # Image display area (custom canvas)
+        # Image display area (QGraphicsView handles scrolling)
         self.image_canvas = ImageCanvas()
-        self.scroll_area.setWidget(self.image_canvas)
-        right_layout.addWidget(self.scroll_area)
+        right_layout.addWidget(self.image_canvas, 1)  # Stretch to fill available space
         
         # Paint tools section - moved between image and tags
         self.create_paint_tools(right_layout)
@@ -170,7 +173,7 @@ class ImageTagEditor(QMainWindow):
         parent.addWidget(right_widget)
         
         # Initialize canvas with proper brush size
-        self.image_canvas.set_brush_size(15)
+        # Brush size set via slider, no init needed
     
     def create_paint_tools(self, layout):
         """Create paint tools UI"""
@@ -269,6 +272,20 @@ class ImageTagEditor(QMainWindow):
         self.cancel_crop_btn.setEnabled(False)
         self.cancel_crop_btn.setToolTip("Cancel crop selection")
         layout.addWidget(self.cancel_crop_btn)
+
+        # Delete button
+        self.delete_btn = QPushButton("🗑️ Delete")
+        self.delete_btn.clicked.connect(self.delete_image)
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.setToolTip("Move image and tags to .deleted folder (Delete key)")
+        layout.addWidget(self.delete_btn)
+
+        # Duplicate button
+        self.duplicate_btn = QPushButton("Duplicate")
+        self.duplicate_btn.clicked.connect(self.duplicate_image)
+        self.duplicate_btn.setEnabled(False)
+        self.duplicate_btn.setToolTip("Duplicate image and tag file")
+        layout.addWidget(self.duplicate_btn)
     
     def create_zoom_controls(self, layout):
         """Create zoom controls"""
@@ -277,11 +294,11 @@ class ImageTagEditor(QMainWindow):
         separator.setFrameShape(QFrame.VLine)
         separator.setFrameShadow(QFrame.Sunken)
         layout.addWidget(separator)
-        
+
         # Zoom label
         zoom_label = QLabel("Zoom:")
         layout.addWidget(zoom_label)
-        
+
         # Zoom out button
         self.zoom_out_btn = QPushButton("−")  # minus sign
         self.zoom_out_btn.setFixedSize(30, 30)
@@ -289,14 +306,14 @@ class ImageTagEditor(QMainWindow):
         self.zoom_out_btn.setToolTip("Zoom out (Ctrl+-)")
         self.zoom_out_btn.setEnabled(False)  # Initially disabled
         layout.addWidget(self.zoom_out_btn)
-        
+
         # Zoom percentage display
         self.zoom_label = QLabel("—")  # Em dash for no image
         self.zoom_label.setMinimumWidth(50)
         self.zoom_label.setAlignment(Qt.AlignCenter)
         self.zoom_label.setStyleSheet("border: 1px solid #666; padding: 2px;")
         layout.addWidget(self.zoom_label)
-        
+
         # Zoom in button
         self.zoom_in_btn = QPushButton("+")  # plus sign
         self.zoom_in_btn.setFixedSize(30, 30)
@@ -304,7 +321,7 @@ class ImageTagEditor(QMainWindow):
         self.zoom_in_btn.setToolTip("Zoom in (Ctrl++)")
         self.zoom_in_btn.setEnabled(False)  # Initially disabled
         layout.addWidget(self.zoom_in_btn)
-        
+
         # Reset zoom button
         self.reset_zoom_btn = QPushButton("1:1")
         self.reset_zoom_btn.setFixedSize(35, 30)
@@ -312,7 +329,7 @@ class ImageTagEditor(QMainWindow):
         self.reset_zoom_btn.setToolTip("Reset zoom to 100% (Ctrl+0)")
         self.reset_zoom_btn.setEnabled(False)  # Initially disabled
         layout.addWidget(self.reset_zoom_btn)
-        
+
         # Fit to window button
         self.fit_window_btn = QPushButton("Fit")
         self.fit_window_btn.setFixedSize(35, 30)
@@ -320,6 +337,29 @@ class ImageTagEditor(QMainWindow):
         self.fit_window_btn.setToolTip("Fit image to window (Ctrl+F)")
         self.fit_window_btn.setEnabled(False)  # Initially disabled
         layout.addWidget(self.fit_window_btn)
+
+        # Update zoom controls based on current state
+        self._update_zoom_controls()
+
+    def _update_zoom_controls(self):
+        """Update the enabled state of zoom controls and labels"""
+        if not self.current_image_path:
+            self.zoom_in_btn.setEnabled(False)
+            self.zoom_out_btn.setEnabled(False)
+            self.reset_zoom_btn.setEnabled(False)
+            self.fit_window_btn.setEnabled(False)
+            self.zoom_label.setText("—")
+            return
+
+        # Enable zoom controls if image is loaded
+        self.zoom_in_btn.setEnabled(True)
+        self.zoom_out_btn.setEnabled(True)
+        self.reset_zoom_btn.setEnabled(True)
+        self.fit_window_btn.setEnabled(True)
+
+        # Update zoom percentage
+        zoom_percentage = self.image_canvas.get_zoom_percentage()
+        self.zoom_label.setText(f"{zoom_percentage}%")
     
     def create_tags_section(self, layout):
         """Create the tags editing section"""
@@ -387,7 +427,7 @@ class ImageTagEditor(QMainWindow):
     
     def update_crop_buttons(self):
         """Update crop button states based on selection"""
-        if self.image_canvas.is_crop_mode:
+        if self.image_canvas.crop_active:
             has_selection = self.image_canvas.has_crop_selection_ready()
             # Apply button is enabled when crop mode is active and selection differs from full image
             self.apply_crop_btn.setEnabled(has_selection)
@@ -542,6 +582,7 @@ class ImageTagEditor(QMainWindow):
         
         # Display image in canvas
         success = self.image_canvas.set_image(image_path)
+        self.image_canvas.fit_to_window()  # Ensure fit after layout
         if not success:
             self.statusBar().showMessage(f"Failed to load image: {image_path.name}")
             self._disable_zoom_controls()
@@ -561,7 +602,9 @@ class ImageTagEditor(QMainWindow):
         # Enable tags editing
         self.tags_edit.setEnabled(True)
         self.save_tags_btn.setEnabled(True)
-        
+        self.delete_btn.setEnabled(True)
+        self.duplicate_btn.setEnabled(True)
+
         # Update status bar with position and zoom info
         current_row = self.image_list.currentRow()
         total_count = self.image_list.count()
@@ -693,13 +736,139 @@ class ImageTagEditor(QMainWindow):
         else:
             return pixmap.save(str(self.current_image_path))
             
+    def duplicate_image(self):
+        """Duplicate the current image and its associated tag file"""
+        if not self.current_image_path or not self.current_image_path.exists():
+            QMessageBox.warning(self, "No Image", "No image selected or image file not found.")
+            return
+
+        try:
+            # Create duplicate image filename (e.g., "image.jpg" -> "image_copy.jpg")
+            image_stem = self.current_image_path.stem
+            image_suffix = self.current_image_path.suffix
+            duplicate_image_path = self.current_image_path.parent / f"{image_stem}_copy{image_suffix}"
+
+            # Handle case where duplicate already exists
+            counter = 1
+            while duplicate_image_path.exists():
+                duplicate_image_path = self.current_image_path.parent / f"{image_stem}_copy{counter}{image_suffix}"
+                counter += 1
+
+            # Copy image file
+            shutil.copy(str(self.current_image_path), str(duplicate_image_path))
+
+            # Copy tag file if it exists
+            tag_file = self.current_image_path.with_suffix('.txt')
+            duplicate_tag_path = duplicate_image_path.with_suffix('.txt')
+            if tag_file.exists():
+                shutil.copy(str(tag_file), str(duplicate_tag_path))
+
+            # Update UI to show the new image
+            self.statusBar().showMessage(f"Duplicated '{self.current_image_path.name}' -> '{duplicate_image_path.name}'")
+
+            # Reload the images list and select the duplicate
+            self.load_images()
+
+            # Find and select the duplicate in the list
+            for i in range(self.image_list.count()):
+                item = self.image_list.item(i)
+                if item.data(Qt.UserRole) == str(duplicate_image_path):
+                    self.image_list.setCurrentRow(i)
+                    self.on_image_selected(item)
+                    break
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Duplicate Failed",
+                f"Failed to duplicate image: {str(e)}"
+            )
+
+    def delete_image(self):
+        """Move current image and associated tag file to .deleted subfolder"""
+        if not self.current_image_path or not self.current_image_path.exists():
+            QMessageBox.warning(self, "No Image", "No image selected or image file not found.")
+            return
+
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Move '{self.current_image_path.name}' and its associated tag file to .deleted folder?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                # Create .deleted subfolder if it doesn't exist
+                deleted_folder = self.current_image_path.parent / ".deleted"
+                deleted_folder.mkdir(exist_ok=True)
+
+                # Move image file
+                deleted_image_path = deleted_folder / self.current_image_path.name
+                shutil.move(str(self.current_image_path), str(deleted_image_path))
+
+                # Move tag file if it exists
+                tag_file = self.current_image_path.with_suffix('.txt')
+                if tag_file.exists():
+                    deleted_tag_path = deleted_folder / tag_file.name
+                    shutil.move(str(tag_file), str(deleted_tag_path))
+
+                # Update UI
+                self._handle_image_deleted()
+
+                self.statusBar().showMessage(f"Moved '{self.current_image_path.name}' to .deleted folder")
+
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Delete Failed",
+                    f"Failed to delete image: {str(e)}"
+                )
+
+    def _handle_image_deleted(self):
+        """Handle UI updates after image deletion"""
+        current_row = self.image_list.currentRow()
+
+        # Remove item from list
+        self.image_list.takeItem(current_row)
+
+        # Select next image if available, otherwise previous
+        new_count = self.image_list.count()
+        if new_count > 0:
+            if current_row < new_count:
+                # Next image available at same index
+                new_row = current_row
+            else:
+                # No next image, go to previous (last item)
+                new_row = new_count - 1
+
+            self.image_list.setCurrentRow(new_row)
+            new_item = self.image_list.item(new_row)
+            if new_item:
+                self.on_image_selected(new_item)
+        else:
+            # No images left
+            self.image_canvas._clear_image_data()
+            self.image_canvas.update()
+            self.tags_edit.clear()
+            self._disable_zoom_controls()
+            self.tags_edit.setEnabled(False)
+            self.save_tags_btn.setEnabled(False)
+            self.delete_btn.setEnabled(False)
+            self.duplicate_btn.setEnabled(False)
+            self.current_image_path = None
+            self.statusBar().showMessage("No more images in folder")
+
     def on_tags_changed(self):
         pass
             
     def eventFilter(self, obj, event):
-        """Global event filter to capture arrow keys for navigation"""
+        """Global event filter to capture arrow keys for navigation and delete key"""
         if event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_Up or event.key() == Qt.Key_Down:
+            if event.key() == Qt.Key_Delete:
+                if self.current_image_path and self.delete_btn.isEnabled():
+                    self.delete_image()
+                return True
+            elif event.key() == Qt.Key_Up or event.key() == Qt.Key_Down:
                 if self.image_list.count() > 0:
                     if self.current_image_path:
                         self.save_tags()

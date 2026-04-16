@@ -14,13 +14,17 @@ MAX_BRUSH_SIZE = 100
 # Crop handle settings
 CROP_HANDLE_SIZE = 12
 MIN_CROP_SIZE = 10  # Minimum crop dimension in pixels
+CROP_MASK_COLOR = (90, 90, 90, 50)
 
 # Zoom settings
-DEFAULT_ZOOM_FACTOR = 1.0
+DEFAULT_ZOOM_FACTOR = 1.0  # Default is used for calculation; actual fit is calculated dynamically
 MIN_ZOOM_FACTOR = 0.1
 MAX_ZOOM_FACTOR = 5.0
 ZOOM_STEP = 0.25
 MOUSE_WHEEL_ZOOM_STEP = 0.1
+
+# Image display padding for fit calculations
+IMAGE_PADDING = 20
 
 # UI Constants
 LEFT_PANEL_MIN_WIDTH = 250

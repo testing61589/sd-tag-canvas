@@ -1,498 +1,57 @@
 """
-Custom image canvas widget for displaying, painting, and cropping images with zoom support.
+Custom image canvas widget using QGraphicsView for displaying, painting, and cropping images with zoom support.
 """
+import sys
+print = lambda *args: sys.stderr.write(' '.join(map(str, args)) + '\\n') if args else None
 
-from PySide6.QtWidgets import QWidget, QSizePolicy
-from PySide6.QtCore import Qt, QSize, QPoint, QRect, Signal, QTimer
-from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QCursor
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsItem,
+                               QSizePolicy, QFrame)
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QRect, QTimer
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTransform, QFont
 
-from config import (CROP_HANDLE_SIZE, MIN_CROP_SIZE, DEFAULT_ZOOM_FACTOR, 
-                   MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR, MOUSE_WHEEL_ZOOM_STEP)
+from config import (CROP_HANDLE_SIZE, MIN_CROP_SIZE, DEFAULT_ZOOM_FACTOR,
+                   MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR, IMAGE_PADDING, DEFAULT_PAINT_COLOR)
 
 
-class ImageCanvas(QWidget):
-    """Custom widget for displaying and painting on images with zoom support"""
-    
-    # Signal emitted when zoom level changes
-    zoom_changed = Signal(float)
-    
-    def __init__(self):
+class CropRectItem(QGraphicsRectItem):
+    def __init__(self, canvas):
         super().__init__()
-        self.image_pixmap = None
-        self.paint_pixmap = None  # Overlay for paint marks
-        self.scaled_pixmap = None
-        self.paint_overlay = None
-        
-        # Paint settings
-        self.paint_color = QColor(255, 0, 0)  # Default red
-        self.brush_size = 15
-        self.is_painting = False
-        self.is_dropper_active = False
-        self.last_point = QPoint()
-        self.has_painted = False  # Track if any painting has been done
-        
-        # Crop settings
-        self.is_crop_mode = False
-        self.is_dragging_handle = False
-        self.active_handle = None  # Which handle is being dragged
-        self.crop_rect = QRect()
-        self.has_crop_selection = False
-        self.handle_size = CROP_HANDLE_SIZE
-        self.handle_hover = None  # Which handle is being hovered
-        
-        # Image positioning and zoom
-        self.image_rect = None
-        self.fit_scale_factor = 1.0  # Scale to fit widget
-        self.zoom_factor = DEFAULT_ZOOM_FACTOR  # User zoom level
-        self.scale_factor = 1.0  # Combined scale factor
-        
-        self.setMinimumSize(400, 300)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("""
-            QWidget {
-                border: 2px dashed #555;
-                background-color: #2b2b2b;
-            }
-        """)
-        
-        # Enable mouse tracking for hover effects
-        self.setMouseTracking(True)
-        
-    def set_image(self, image_path):
-        """Load and display an image"""
-        try:
-            self.image_pixmap = QPixmap(str(image_path))
-            if not self.image_pixmap.isNull():
-                # Reset zoom when loading new image
-                self.zoom_factor = DEFAULT_ZOOM_FACTOR
-                self.update_display()
-                # Create a new paint overlay for this image
-                self.paint_overlay = QPixmap(self.image_pixmap.size())
-                self.paint_overlay.fill(Qt.transparent)
-                self.has_painted = False  # Reset paint flag for new image
-                self.clear_crop_selection()  # Clear any crop selection
-                self.zoom_changed.emit(self.zoom_factor)
-                return True
-            else:
-                self._clear_image_data()
-                return False
-        except Exception as e:
-            print(f"Error loading image: {e}")
-            self._clear_image_data()
-            return False
-    
-    def _clear_image_data(self):
-        """Clear all image-related data"""
-        self.image_pixmap = None
-        self.paint_overlay = None
-        self.has_painted = False
-        self.zoom_factor = DEFAULT_ZOOM_FACTOR
-        self.clear_crop_selection()
-        self.update()
-    
-    def zoom_in(self):
-        """Zoom in by one step"""
-        if not self.image_pixmap:
-            return
-        
-        # Use smaller increments for more controlled zooming
-        if self.zoom_factor < 1.0:
-            # Below 100%, use 0.1 increments
-            new_zoom = min(1.0, self.zoom_factor + 0.1)
-        else:
-            # Above 100%, use 0.25 increments
-            new_zoom = min(MAX_ZOOM_FACTOR, self.zoom_factor + 0.25)
-        
-        self.set_zoom(new_zoom)
-    
-    def zoom_out(self):
-        """Zoom out by one step"""
-        if not self.image_pixmap:
-            return
-        
-        # Use smaller increments for more controlled zooming
-        if self.zoom_factor <= 1.0:
-            # At or below 100%, use 0.1 increments
-            new_zoom = max(MIN_ZOOM_FACTOR, self.zoom_factor - 0.1)
-        else:
-            # Above 100%, use 0.25 increments
-            new_zoom = max(1.0, self.zoom_factor - 0.25)
-        
-        self.set_zoom(new_zoom)
-    
-    def reset_zoom(self):
-        """Reset zoom to 100%"""
-        if not self.image_pixmap:
-            return
-        self.set_zoom(DEFAULT_ZOOM_FACTOR)
-    
-    def fit_to_window(self):
-        """Set zoom to fit image in window"""
-        if not self.image_pixmap:
-            return
-        
-        # Get the scroll area size if we're in one
-        parent_scroll = self.parent()
-        if hasattr(parent_scroll, 'viewport'):
-            viewport_size = parent_scroll.viewport().size()
-            available_width = max(viewport_size.width() - 40, 100)
-            available_height = max(viewport_size.height() - 40, 100)
-        else:
-            widget_size = self.size()
-            available_width = max(widget_size.width() - 40, 100)
-            available_height = max(widget_size.height() - 40, 100)
-        
-        # Calculate what zoom level would fit the image perfectly
-        fit_zoom = min(
-            available_width / self.image_pixmap.width(),
-            available_height / self.image_pixmap.height()
-        )
-        
-        # Set this as the zoom level
-        self.set_zoom(fit_zoom)
-    
-    def set_zoom(self, zoom_factor):
-        """Set zoom factor and update display"""
-        if not self.image_pixmap:
-            return
-            
-        # Clamp zoom factor to safe bounds
-        self.zoom_factor = max(MIN_ZOOM_FACTOR, min(MAX_ZOOM_FACTOR, zoom_factor))
-        
-        # Only update display if zoom actually changed
-        self.update_display()
-        self.zoom_changed.emit(self.zoom_factor)
-    
-    def get_zoom_percentage(self):
-        """Get current zoom as percentage"""
-        return int(self.zoom_factor * 100)
-    
-    def update_display(self):
-        """Update the scaled display of the image"""
-        if not self.image_pixmap:
-            return
-            
-        # Get the scroll area size if we're in one
-        parent_scroll = self.parent()
-        if hasattr(parent_scroll, 'viewport'):
-            viewport_size = parent_scroll.viewport().size()
-            available_width = max(viewport_size.width() - 40, 100)
-            available_height = max(viewport_size.height() - 40, 100)
-        else:
-            widget_size = self.size()
-            available_width = max(widget_size.width() - 40, 100)
-            available_height = max(widget_size.height() - 40, 100)
-        
-        # Calculate what scale would fit the image in the available space
-        self.fit_scale_factor = min(
-            available_width / self.image_pixmap.width(),
-            available_height / self.image_pixmap.height()
-        )
-        
-        # The actual scale factor depends on zoom mode:
-        # - zoom_factor = 1.0 means actual size (100%)
-        # - zoom_factor < 1.0 means smaller than actual size
-        # - zoom_factor > 1.0 means larger than actual size
-        
-        if self.zoom_factor <= 1.0:
-            # For zoom <= 100%, use fit scale as maximum, zoom as multiplier
-            self.scale_factor = min(self.fit_scale_factor, self.zoom_factor)
-        else:
-            # For zoom > 100%, use zoom directly (ignoring fit scale)
-            self.scale_factor = self.zoom_factor
-        
-        # Calculate final image size
-        final_width = int(self.image_pixmap.width() * self.scale_factor)
-        final_height = int(self.image_pixmap.height() * self.scale_factor)
-        
-        # Set minimum size for scroll area to work properly
-        min_width = max(final_width + 40, 400)
-        min_height = max(final_height + 40, 300)
-        self.setMinimumSize(min_width, min_height)
-        
-        # Calculate image position (centered)
-        widget_size = self.size()
-        x = max((widget_size.width() - final_width) // 2, 20)
-        y = max((widget_size.height() - final_height) // 2, 20)
-            
-        self.image_rect = (x, y, final_width, final_height)
-        
-        self.update()
-    
-    def wheelEvent(self, event):
-        """Handle mouse wheel for zooming"""
-        if not self.image_pixmap:
-            super().wheelEvent(event)
-            return
-            
-        # Check if Ctrl is pressed for zoom
-        if event.modifiers() & Qt.ControlModifier:
-            try:
-                # Zoom in/out based on wheel direction
-                angle_delta = event.angleDelta().y()
-                
-                # Use smaller increments for mouse wheel
-                zoom_step = 0.05  # 5% increments for smooth mouse wheel zooming
-                
-                if angle_delta > 0:
-                    # Zoom in
-                    new_zoom = min(MAX_ZOOM_FACTOR, self.zoom_factor + zoom_step)
-                else:
-                    # Zoom out
-                    new_zoom = max(MIN_ZOOM_FACTOR, self.zoom_factor - zoom_step)
-                
-                self.set_zoom(new_zoom)
-                event.accept()
-            except Exception as e:
-                print(f"Zoom error: {e}")
-                super().wheelEvent(event)
-        else:
-            # Pass to parent for scrolling
-            super().wheelEvent(event)
-    
-    def paintEvent(self, event):
-        """Custom paint event to draw image and paint overlay"""
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(43, 43, 43))  # Dark background
-        
-        if self.image_pixmap and self.image_rect:
-            # Draw the base image
-            scaled_image = self.image_pixmap.scaled(
-                QSize(int(self.image_pixmap.width() * self.scale_factor),
-                     int(self.image_pixmap.height() * self.scale_factor)),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            
-            x, y, w, h = self.image_rect
-            painter.drawPixmap(x, y, scaled_image)
-            
-            # Draw paint overlay if it exists
-            if self.paint_overlay:
-                scaled_overlay = self.paint_overlay.scaled(
-                    scaled_image.size(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                painter.drawPixmap(x, y, scaled_overlay)
-            
-            # Draw crop selection rectangle
-            if self.is_crop_mode and self.has_crop_selection:
-                self.draw_crop_rectangle(painter)
-        else:
-            # No image loaded
-            painter.setPen(QColor(170, 170, 170))  # Light gray text for dark background
-            painter.drawText(self.rect(), Qt.AlignCenter, "No image selected")
-    
-    def draw_crop_rectangle(self, painter):
-        """Draw the crop selection rectangle with edge handles"""
-        if not self.has_crop_selection or not self.image_rect:
-            return
-        
-        # Convert image coordinates to screen coordinates for display
-        screen_rect = self.image_to_screen_rect(self.crop_rect)
-        if not screen_rect.isValid():
-            return
-        
-        # Draw crop rectangle
-        painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.SolidLine))  # Yellow solid line
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(screen_rect)
-        
-        # Draw dimmed overlay outside crop area
-        self._draw_crop_overlay(painter, screen_rect)
-        
-        # Draw handles
-        self.draw_crop_handles(painter, screen_rect)
-    
-    def _draw_crop_overlay(self, painter, screen_rect):
-        """Draw dimmed overlay outside crop area"""
-        painter.setBrush(QColor(0, 0, 0, 100))  # Semi-transparent black
-        x, y, w, h = self.image_rect
-        image_screen_rect = QRect(x, y, w, h)
-        
-        # Top rectangle
-        if screen_rect.top() > image_screen_rect.top():
-            painter.drawRect(image_screen_rect.left(), image_screen_rect.top(), 
-                           image_screen_rect.width(), screen_rect.top() - image_screen_rect.top())
-        
-        # Bottom rectangle  
-        if screen_rect.bottom() < image_screen_rect.bottom():
-            painter.drawRect(image_screen_rect.left(), screen_rect.bottom(),
-                           image_screen_rect.width(), image_screen_rect.bottom() - screen_rect.bottom())
-        
-        # Left rectangle
-        if screen_rect.left() > image_screen_rect.left():
-            painter.drawRect(image_screen_rect.left(), screen_rect.top(),
-                           screen_rect.left() - image_screen_rect.left(), screen_rect.height())
-        
-        # Right rectangle
-        if screen_rect.right() < image_screen_rect.right():
-            painter.drawRect(screen_rect.right(), screen_rect.top(),
-                           image_screen_rect.right() - screen_rect.right(), screen_rect.height())
-    
-    def draw_crop_handles(self, painter, screen_rect):
-        """Draw crop handles on edges and corners"""
-        # Handle colors
-        normal_color = QColor(255, 255, 0)  # Yellow
-        hover_color = QColor(255, 255, 255)  # White for hover
-        
-        handles = self.get_handle_rects(screen_rect)
-        
-        for handle_name, handle_rect in handles.items():
-            # Choose color based on hover state
-            if self.handle_hover == handle_name:
-                painter.setBrush(hover_color)
-                painter.setPen(QPen(QColor(0, 0, 0), 2))  # Black border for contrast
-            else:
-                painter.setBrush(normal_color)
-                painter.setPen(QPen(QColor(0, 0, 0), 1))
-            
-            painter.drawRect(handle_rect)
-    
-    def get_handle_rects(self, screen_rect):
-        """Get rectangles for all crop handles"""
-        handle_size = self.handle_size
-        handles = {}
-        
-        # Corner handles
-        handles['top-left'] = QRect(screen_rect.left() - handle_size//2, 
-                                   screen_rect.top() - handle_size//2, 
-                                   handle_size, handle_size)
-        
-        handles['top-right'] = QRect(screen_rect.right() - handle_size//2, 
-                                    screen_rect.top() - handle_size//2, 
-                                    handle_size, handle_size)
-        
-        handles['bottom-left'] = QRect(screen_rect.left() - handle_size//2, 
-                                      screen_rect.bottom() - handle_size//2, 
-                                      handle_size, handle_size)
-        
-        handles['bottom-right'] = QRect(screen_rect.right() - handle_size//2, 
-                                       screen_rect.bottom() - handle_size//2, 
-                                       handle_size, handle_size)
-        
-        # Edge handles (center of each edge)
-        handles['top'] = QRect(screen_rect.center().x() - handle_size//2, 
-                              screen_rect.top() - handle_size//2, 
-                              handle_size, handle_size)
-        
-        handles['bottom'] = QRect(screen_rect.center().x() - handle_size//2, 
-                                 screen_rect.bottom() - handle_size//2, 
-                                 handle_size, handle_size)
-        
-        handles['left'] = QRect(screen_rect.left() - handle_size//2, 
-                               screen_rect.center().y() - handle_size//2, 
-                               handle_size, handle_size)
-        
-        handles['right'] = QRect(screen_rect.right() - handle_size//2, 
-                                screen_rect.center().y() - handle_size//2, 
-                                handle_size, handle_size)
-        
-        return handles
-    
-    def resizeEvent(self, event):
-        """Handle widget resize"""
-        super().resizeEvent(event)
-        # Only update display if we have an image and the resize was significant
-        if self.image_pixmap and event.size() != event.oldSize():
-            # Use a small delay to prevent rapid resize events from causing issues
-            if not hasattr(self, '_resize_timer'):
-                self._resize_timer = QTimer()
-                self._resize_timer.setSingleShot(True)
-                self._resize_timer.timeout.connect(self.update_display)
-            
-            self._resize_timer.stop()
-            self._resize_timer.start(50)  # 50ms delay
-    
-    def mousePressEvent(self, event):
-        """Handle mouse press for painting, cropping, or color picking"""
-        if not self.image_pixmap or not self.image_rect:
-            return
-            
-        # Check if click is within image bounds
-        click_pos = event.position().toPoint()
-        x, y, w, h = self.image_rect
-        
-        if self.is_crop_mode and self.has_crop_selection:
-            # Check if clicking on a crop handle
-            handle = self.get_handle_under_point(click_pos)
-            if handle:
-                self.is_dragging_handle = True
-                self.active_handle = handle
-                return
-        
-        if (x <= click_pos.x() <= x + w and y <= click_pos.y() <= y + h):
-            if self.is_crop_mode:
-                # In crop mode but not clicking a handle - do nothing
-                pass
-            elif self.is_dropper_active:
-                self.pick_color(click_pos)
-            else:
-                self.is_painting = True
-                self.last_point = click_pos
-                self.draw_point(click_pos)
-    
-    def mouseMoveEvent(self, event):
-        """Handle mouse move for painting, cropping, or hover effects"""
-        if not self.image_pixmap or not self.image_rect:
-            return
-            
-        current_point = event.position().toPoint()
-        x, y, w, h = self.image_rect
-        
-        # Handle crop handle dragging
-        if self.is_crop_mode and self.is_dragging_handle and self.active_handle:
-            self.update_crop_from_handle(current_point)
-            return
-        
-        # Handle crop handle hover effects
-        if self.is_crop_mode and self.has_crop_selection:
-            old_hover = self.handle_hover
-            self.handle_hover = self.get_handle_under_point(current_point)
-            if old_hover != self.handle_hover:
-                self.update_cursor_for_handle(self.handle_hover)
-                self.update()
-            return
-        
-        # Handle painting
-        if (x <= current_point.x() <= x + w and y <= current_point.y() <= y + h):
-            if self.is_painting:
-                self.draw_line(self.last_point, current_point)
-                self.last_point = current_point
-    
-    def mouseReleaseEvent(self, event):
-        """Handle mouse release"""
-        if self.is_dragging_handle:
-            self.is_dragging_handle = False
-            self.active_handle = None
-        self.is_painting = False
-    
-    def get_handle_under_point(self, point):
-        """Get which handle (if any) is under the given point"""
-        if not self.has_crop_selection or not self.image_rect:
-            return None
-        
-        screen_rect = self.image_to_screen_rect(self.crop_rect)
-        if not screen_rect.isValid():
-            return None
-        
-        handles = self.get_handle_rects(screen_rect)
-        
-        for handle_name, handle_rect in handles.items():
-            if handle_rect.contains(point):
-                return handle_name
-        
+        self.canvas = canvas
+        self.setPen(QPen(QColor(255, 255, 0), 3, Qt.SolidLine))  # Thicker for visibility
+        self.setBrush(QBrush(Qt.NoBrush))
+        self.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self._drag_handle = None
+        self._hover_handle = None
+        self._whole_drag_start = None
+
+    def _get_handle_at(self, pos):
+        zoom = self.canvas.zoom_factor
+        hs = max(20, CROP_HANDLE_SIZE / zoom)  # Adaptive size
+        hs2 = hs / 2
+        r = self.rect()
+        print(f"Hit test: pos={pos}, hs={hs}, zoom={zoom}, rect={r}")
+
+        handles = {
+            'top-left': QRectF(r.left() - hs2, r.top() - hs2, hs, hs),
+            'top-right': QRectF(r.right() - hs2, r.top() - hs2, hs, hs),
+            'bottom-left': QRectF(r.left() - hs2, r.bottom() - hs2, hs, hs),
+            'bottom-right': QRectF(r.right() - hs2, r.bottom() - hs2, hs, hs),
+            'top': QRectF(r.center().x() - hs2, r.top() - hs2, hs, hs),
+            'bottom': QRectF(r.center().x() - hs2, r.bottom() - hs2, hs, hs),
+            'left': QRectF(r.left() - hs2, r.center().y() - hs2, hs, hs),
+            'right': QRectF(r.right() - hs2, r.center().y() - hs2, hs, hs),
+        }
+        for name, hrect in handles.items():
+            if hrect.contains(pos):
+                print(f"HIT {name} {hrect}")
+                return name
+        print("No hit")
         return None
-    
-    def update_cursor_for_handle(self, handle_name):
-        """Update cursor based on which handle is being hovered"""
-        if not handle_name:
-            if self.is_crop_mode:
-                self.setCursor(Qt.ArrowCursor)
-            return
-        
-        # Set appropriate resize cursors for different handles
+
+    def _get_cursor_for_handle(self, handle):
         cursor_map = {
             'top-left': Qt.SizeFDiagCursor,
             'top-right': Qt.SizeBDiagCursor,
@@ -503,294 +62,544 @@ class ImageCanvas(QWidget):
             'left': Qt.SizeHorCursor,
             'right': Qt.SizeHorCursor,
         }
-        
-        cursor = cursor_map.get(handle_name, Qt.ArrowCursor)
+        return cursor_map.get(handle, Qt.ArrowCursor)
+
+    def hoverMoveEvent(self, event):
+        print("Crop hover")
+        pos = event.pos()
+        self._hover_handle = self._get_handle_at(pos)
+        is_inside = self.rect().contains(pos)
+        if self._hover_handle:
+            cursor = self._get_cursor_for_handle(self._hover_handle)
+        elif is_inside:
+            cursor = Qt.SizeAllCursor
+        else:
+            cursor = Qt.ArrowCursor
         self.setCursor(cursor)
-    
-    def update_crop_from_handle(self, mouse_pos):
-        """Update crop rectangle based on handle being dragged"""
-        if not self.active_handle or not self.image_rect:
-            return
-        
-        # Convert mouse position to image coordinates
-        image_point = self.screen_to_image_coords(mouse_pos)
-        if not image_point:
-            return
-        
-        # Get current crop rectangle
-        left = self.crop_rect.left()
-        top = self.crop_rect.top()
-        right = self.crop_rect.right()
-        bottom = self.crop_rect.bottom()
-        
-        # Update rectangle based on which handle is being dragged
-        if self.active_handle == 'top-left':
-            left = min(image_point.x(), right - MIN_CROP_SIZE)
-            top = min(image_point.y(), bottom - MIN_CROP_SIZE)
-        elif self.active_handle == 'top-right':
-            right = max(image_point.x(), left + MIN_CROP_SIZE)
-            top = min(image_point.y(), bottom - MIN_CROP_SIZE)
-        elif self.active_handle == 'bottom-left':
-            left = min(image_point.x(), right - MIN_CROP_SIZE)
-            bottom = max(image_point.y(), top + MIN_CROP_SIZE)
-        elif self.active_handle == 'bottom-right':
-            right = max(image_point.x(), left + MIN_CROP_SIZE)
-            bottom = max(image_point.y(), top + MIN_CROP_SIZE)
-        elif self.active_handle == 'top':
-            top = min(image_point.y(), bottom - MIN_CROP_SIZE)
-        elif self.active_handle == 'bottom':
-            bottom = max(image_point.y(), top + MIN_CROP_SIZE)
-        elif self.active_handle == 'left':
-            left = min(image_point.x(), right - MIN_CROP_SIZE)
-        elif self.active_handle == 'right':
-            right = max(image_point.x(), left + MIN_CROP_SIZE)
-        
-        # Constrain to image bounds
-        left = max(0, left)
-        top = max(0, top)
-        right = min(self.image_pixmap.width(), right)
-        bottom = min(self.image_pixmap.height(), bottom)
-        
-        # Update crop rectangle
-        self.crop_rect = QRect(left, top, right - left, bottom - top)
         self.update()
-        
-        # Notify parent window to update button states
-        self._notify_parent_crop_update()
-    
+        super().hoverMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        print("Crop press")
+        if event.button() == Qt.LeftButton:
+            local_pos = event.pos()
+            handle = self._get_handle_at(local_pos)
+            if handle:
+                self._drag_handle = handle
+                self._whole_drag_start = None
+                print(f"Handle drag start: {handle}")
+            elif self.rect().contains(local_pos):
+                self._drag_handle = None
+                self._whole_drag_start = self.mapToScene(local_pos)
+                print("Whole drag start")
+            else:
+                super().mousePressEvent(event)
+                return
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        scene_pos = self.mapToScene(event.pos())
+        if self._drag_handle:
+            self.canvas._resize_crop(scene_pos, self._drag_handle)
+            self.canvas._notify_parent_crop_update()
+        elif self._whole_drag_start is not None:
+            delta = scene_pos - self._whole_drag_start
+            self.canvas._move_crop_whole(delta)
+            self._whole_drag_start = scene_pos
+            self.canvas._notify_parent_crop_update()
+        else:
+            super().mouseMoveEvent(event)
+            return
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        print("Crop release")
+        self._drag_handle = None
+        self._whole_drag_start = None
+        event.accept()
+
+    def paint(self, painter, option, widget):
+        super().paint(painter, option, widget)
+        zoom = self.canvas.zoom_factor
+        hs = max(20, CROP_HANDLE_SIZE / zoom)
+        hs2 = hs / 2
+        r = self.rect()
+        normal_color = QColor(255, 255, 0)
+        hover_color = QColor(255, 255, 255)
+        handle_pen = QPen(QColor(0, 0, 0), 2)
+
+        handle_rects = [
+            ('top-left', r.left() - hs2, r.top() - hs2),
+            ('top-right', r.right() - hs2, r.top() - hs2),
+            ('bottom-left', r.left() - hs2, r.bottom() - hs2),
+            ('bottom-right', r.right() - hs2, r.bottom() - hs2),
+            ('top', r.center().x() - hs2, r.top() - hs2),
+            ('bottom', r.center().x() - hs2, r.bottom() - hs2),
+            ('left', r.left() - hs2, r.center().y() - hs2),
+            ('right', r.right() - hs2, r.center().y() - hs2),
+        ]
+        for name, hx, hy in handle_rects:
+            hrect = QRectF(hx, hy, hs, hs)
+            color = hover_color if name == self._hover_handle else normal_color
+            painter.setBrush(color)
+            painter.setPen(handle_pen if name == self._hover_handle else QPen(Qt.NoPen))
+            painter.drawRect(hrect)
+
+
+class ImageCanvas(QGraphicsView):
+    zoom_changed = Signal(float)
+
+    def __init__(self):
+        print("ImageCanvas __init__")
+        super().__init__()
+        self.scene = QGraphicsScene()
+        self.setScene(self.scene)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setBackgroundBrush(QColor(43, 43, 43))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAlignment(Qt.AlignCenter)
+        self.setFrameStyle(QFrame.NoFrame)
+        self.setStyleSheet("QGraphicsView { border: none; }")
+        self.image_item = None
+        self.paint_item = None
+        self.image_pixmap = None
+        self.paint_pixmap = None
+        self.paint_color = QColor(*DEFAULT_PAINT_COLOR)
+        self.brush_size = 15
+        self.is_painting = False
+        self.dropper_active = False
+        self.crop_active = False
+        self.has_painted = False
+        self.last_point = QPointF()
+        self.crop_rect_item = None
+        self.top_overlay = None
+        self.bottom_overlay = None
+        self.left_overlay = None
+        self.right_overlay = None
+        self.crop_rect = QRectF()
+        self.zoom_factor = DEFAULT_ZOOM_FACTOR
+        self.fit_zoom_factor = 1.0
+        self.no_image_text = self.scene.addText("No image selected", QFont("Arial", 14))
+        self.no_image_text.setDefaultTextColor(QColor(170, 170, 170))
+        self.no_image_text.setPos(-200, -20)
+        print("ImageCanvas init complete")
+
+    def set_image(self, image_path):
+        print(f"set_image({image_path})")
+        try:
+            self.image_pixmap = QPixmap(str(image_path))
+            print(f"pixmap: {self.image_pixmap.size()}, valid: {not self.image_pixmap.isNull()}")
+            if self.image_pixmap.isNull():
+                self._clear_image_data()
+                return False
+
+            if self.image_item:
+                self.scene.removeItem(self.image_item)
+            if self.paint_item:
+                self.scene.removeItem(self.paint_item)
+
+            self.image_item = self.scene.addPixmap(self.image_pixmap)
+            self.paint_pixmap = QPixmap(self.image_pixmap.size())
+            self.paint_pixmap.fill(Qt.transparent)
+            self.paint_item = self.scene.addPixmap(self.paint_pixmap)
+
+            self.has_painted = False
+            self.clear_crop_selection()
+            self.no_image_text.setVisible(False)
+
+            rect = QRectF(self.image_pixmap.rect()).adjusted(-IMAGE_PADDING, -IMAGE_PADDING, IMAGE_PADDING, IMAGE_PADDING)
+            self.scene.setSceneRect(rect)
+
+            self.zoom_factor = DEFAULT_ZOOM_FACTOR
+            QTimer.singleShot(0, self._deferred_fit)
+            return True
+        except Exception as e:
+            print(f"set_image error: {e}")
+            self._clear_image_data()
+            return False
+
+    def _deferred_fit(self):
+        print(f"_deferred_fit, canvas size: {self.size()}, viewport: {self.viewport().size()}")
+        if self.image_item:
+            rect = self._get_image_rect()
+            self.fitInView(rect.adjusted(-IMAGE_PADDING, -IMAGE_PADDING, IMAGE_PADDING, IMAGE_PADDING), Qt.KeepAspectRatio)
+            self.zoom_factor = min(self.transform().m11(), self.transform().m22())
+            self.fit_zoom_factor = self.zoom_factor
+            self.centerOn(self.image_item)
+            self.zoom_changed.emit(self.zoom_factor)
+            print(f"Fit complete, zoom: {self.zoom_factor}, scene rect: {self.scene.sceneRect()}")
+
+    def _get_image_rect(self):
+        return self.image_item.sceneBoundingRect() if self.image_item else QRectF()
+
+    def _clear_image_data(self):
+        print("_clear_image_data")
+        self.clear_crop_selection()
+        if self.image_item:
+            self.scene.removeItem(self.image_item)
+            self.image_item = None
+        if self.paint_item:
+            self.scene.removeItem(self.paint_item)
+            self.paint_item = None
+        self.image_pixmap = None
+        self.paint_pixmap = None
+        self.has_painted = False
+        self.zoom_factor = DEFAULT_ZOOM_FACTOR
+        self.no_image_text.setVisible(True)
+        self.fit_zoom_factor = 1.0
+        self.scene.setSceneRect(QRectF())
+
+    def zoom_in(self):
+        if not self.image_item:
+            return
+        step = 0.25 if self.zoom_factor >= 1.0 else 0.1
+        new_zoom = min(MAX_ZOOM_FACTOR, self.zoom_factor + step)
+        self.set_zoom(new_zoom)
+
+    def zoom_out(self):
+        if not self.image_item:
+            return
+        step = 0.25 if self.zoom_factor > 1.0 else 0.1
+        new_zoom = max(MIN_ZOOM_FACTOR, self.zoom_factor - step)
+        self.set_zoom(new_zoom)
+
+    def reset_zoom(self):
+        if not self.image_item:
+            return
+        self.set_zoom(DEFAULT_ZOOM_FACTOR)
+
+    def fit_to_window(self):
+        print("fit_to_window called")
+        if not self.image_item:
+            return
+        rect = self._get_image_rect()
+        self.fitInView(rect.adjusted(-IMAGE_PADDING, -IMAGE_PADDING, IMAGE_PADDING, IMAGE_PADDING), Qt.KeepAspectRatio)
+        self.zoom_factor = min(self.transform().m11(), self.transform().m22())
+        self.fit_zoom_factor = self.zoom_factor
+        self.zoom_changed.emit(self.zoom_factor)
+        self.centerOn(self.image_item)
+
+    def set_zoom(self, zoom_factor):
+        if not self.image_item:
+            return
+        self.zoom_factor = max(MIN_ZOOM_FACTOR, min(MAX_ZOOM_FACTOR, zoom_factor))
+        self.resetTransform()
+        self.scale(self.zoom_factor, self.zoom_factor)
+        self.zoom_changed.emit(self.zoom_factor)
+
+    def get_zoom_percentage(self):
+        return int(self.zoom_factor * 100)
+
+    def resizeEvent(self, event):
+        print(f"resizeEvent old: {event.oldSize()}, new: {event.size()}")
+        super().resizeEvent(event)
+        if self.image_item and abs(self.zoom_factor - self.fit_zoom_factor) < 0.01:
+            self.fit_to_window()
+
+    def wheelEvent(self, event):
+        if self.image_item and event.modifiers() & Qt.ControlModifier:
+            factor = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
+            new_zoom = max(MIN_ZOOM_FACTOR, min(MAX_ZOOM_FACTOR, self.zoom_factor * factor))
+            self.set_zoom(new_zoom)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def mousePressEvent(self, event):
+        if not self.image_item:
+            super().mousePressEvent(event)
+            return
+        scene_pos = self.mapToScene(event.position().toPoint())
+        image_rect = self._get_image_rect()
+        if not image_rect.contains(scene_pos):
+            super().mousePressEvent(event)
+            return
+        if self.crop_active:
+            super().mousePressEvent(event)
+        elif self.dropper_active:
+            self.pick_color(scene_pos)
+            event.accept()
+        else:
+            if event.button() == Qt.LeftButton:
+                self.is_painting = True
+                self.last_point = scene_pos
+                self.draw_point(scene_pos)
+                event.accept()
+            else:
+                super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self.image_item:
+            super().mouseMoveEvent(event)
+            return
+        scene_pos = self.mapToScene(event.position().toPoint())
+        image_rect = self._get_image_rect()
+        if not image_rect.contains(scene_pos):
+            super().mouseMoveEvent(event)
+            return
+        if self.is_painting:
+            self.draw_line(self.last_point, scene_pos)
+            self.last_point = scene_pos
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.is_painting = False
+        super().mouseReleaseEvent(event)
+
+    def _resize_crop(self, scene_pos, handle):
+        left, top, right, bottom = self.crop_rect.getCoords()
+        img_w = self.image_item.pixmap().width()
+        img_h = self.image_item.pixmap().height()
+        if handle in ('top', 'bottom'):
+            scene_pos.setX(max(left, min(scene_pos.x(), right)))
+        elif handle in ('left', 'right'):
+            scene_pos.setY(max(top, min(scene_pos.y(), bottom)))
+        if handle == 'top-left':
+            left = min(scene_pos.x(), right - MIN_CROP_SIZE)
+            top = min(scene_pos.y(), bottom - MIN_CROP_SIZE)
+        elif handle == 'top-right':
+            right = max(scene_pos.x(), left + MIN_CROP_SIZE)
+            top = min(scene_pos.y(), bottom - MIN_CROP_SIZE)
+        elif handle == 'bottom-left':
+            left = min(scene_pos.x(), right - MIN_CROP_SIZE)
+            bottom = max(scene_pos.y(), top + MIN_CROP_SIZE)
+        elif handle == 'bottom-right':
+            right = max(scene_pos.x(), left + MIN_CROP_SIZE)
+            bottom = max(scene_pos.y(), top + MIN_CROP_SIZE)
+        elif handle == 'top':
+            top = min(scene_pos.y(), bottom - MIN_CROP_SIZE)
+        elif handle == 'bottom':
+            bottom = max(scene_pos.y(), top + MIN_CROP_SIZE)
+        elif handle == 'left':
+            left = min(scene_pos.x(), right - MIN_CROP_SIZE)
+        elif handle == 'right':
+            right = max(scene_pos.x(), left + MIN_CROP_SIZE)
+        left = max(0.0, left)
+        top = max(0.0, top)
+        right = min(float(img_w), right)
+        bottom = min(float(img_h), bottom)
+        if right - left < MIN_CROP_SIZE:
+            center_x = (left + right) / 2
+            left = max(0.0, center_x - MIN_CROP_SIZE / 2)
+            right = min(float(img_w), left + MIN_CROP_SIZE)
+        if bottom - top < MIN_CROP_SIZE:
+            center_y = (top + bottom) / 2
+            top = max(0.0, center_y - MIN_CROP_SIZE / 2)
+            bottom = min(float(img_h), top + MIN_CROP_SIZE)
+        self.crop_rect = QRectF(left, top, right - left, bottom - top)
+        self.crop_rect_item.setRect(self.crop_rect)
+        self._update_crop_overlays()
+
+    def _move_crop_whole(self, delta):
+        if not self.crop_rect_item:
+            return
+        img_w = float(self.image_item.pixmap().width())
+        img_h = float(self.image_item.pixmap().height())
+        new_left = self.crop_rect.left() + delta.x()
+        new_top = self.crop_rect.top() + delta.y()
+        w = self.crop_rect.width()
+        h = self.crop_rect.height()
+        new_left = max(0.0, min(new_left, img_w - w))
+        new_top = max(0.0, min(new_top, img_h - h))
+        self.crop_rect = QRectF(new_left, new_top, w, h)
+        self.crop_rect_item.setRect(self.crop_rect)
+        self._update_crop_overlays()
+
     def _notify_parent_crop_update(self):
-        """Notify parent window about crop updates"""
         parent = self.parent()
         while parent and not hasattr(parent, 'update_crop_buttons'):
             parent = parent.parent()
-        if parent and hasattr(parent, 'update_crop_buttons'):
+        if parent:
             parent.update_crop_buttons()
-    
+
     def clear_crop_selection(self):
-        """Clear crop selection"""
-        self.has_crop_selection = False
-        self.is_dragging_handle = False
-        self.active_handle = None
-        self.handle_hover = None
-        self.crop_rect = QRect()
-        self.update()
-    
+        self.crop_active = False
+        if self.crop_rect_item:
+            self.scene.removeItem(self.crop_rect_item)
+            self.crop_rect_item = None
+        if self.top_overlay:
+            self.scene.removeItem(self.top_overlay)
+            self.top_overlay = None
+        if self.bottom_overlay:
+            self.scene.removeItem(self.bottom_overlay)
+            self.bottom_overlay = None
+        if self.left_overlay:
+            self.scene.removeItem(self.left_overlay)
+            self.left_overlay = None
+        if self.right_overlay:
+            self.scene.removeItem(self.right_overlay)
+            self.right_overlay = None
+        self.crop_rect = QRectF()
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
     def initialize_crop_selection(self):
-        """Initialize crop selection to cover the entire image"""
-        if not self.image_pixmap:
+        if not self.image_item:
             return
-        
-        # Set crop rectangle to cover the entire image
-        self.crop_rect = QRect(0, 0, self.image_pixmap.width(), self.image_pixmap.height())
-        self.has_crop_selection = True
-        self.update()
-    
+        img_w = float(self.image_item.pixmap().width())
+        img_h = float(self.image_item.pixmap().height())
+        self.crop_rect = QRectF(0, 0, img_w, img_h)
+        self.crop_rect_item = CropRectItem(self)
+        self.scene.addItem(self.crop_rect_item)
+        self.crop_rect_item.setRect(self.crop_rect)
+        self.crop_rect_item.setZValue(2)
+        self._create_crop_overlays()
+        self._update_crop_overlays()
+
+    def set_crop_mode(self, active):
+        self.crop_active = active
+        if active:
+            self.dropper_active = False
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.initialize_crop_selection()
+        else:
+            self.clear_crop_selection()
+
+    def has_crop_selection_ready(self):
+        if not self.crop_active or not self.crop_rect_item:
+            return False
+        full_rect = QRectF(0, 0, self.image_item.pixmap().width(), self.image_item.pixmap().height())
+        return self.crop_rect != full_rect
+
     def perform_crop(self):
-        """Perform the actual crop operation"""
-        if not self.has_crop_selection or not self.image_pixmap:
+        if not self.has_crop_selection_ready() or not self.image_item:
             return False
-        
-        # Ensure crop rectangle is within image bounds
-        image_bounds = QRect(0, 0, self.image_pixmap.width(), self.image_pixmap.height())
-        crop_rect = self.crop_rect.intersected(image_bounds)
-        
-        if crop_rect.isEmpty():
+        crop_r = self.crop_rect.toRect()
+        img_r = self._get_image_rect().toRect()
+        crop_r = crop_r.intersected(img_r)
+        if crop_r.isEmpty():
             return False
-        
-        # Crop the original image
-        cropped_image = self.image_pixmap.copy(crop_rect)
-        
-        # If there are paint marks, crop the overlay too and apply it
-        if self.has_painted and self.paint_overlay:
-            cropped_overlay = self.paint_overlay.copy(crop_rect)
-            
-            # Apply the cropped overlay to the cropped image
+        cropped_image = self.image_pixmap.copy(crop_r)
+        if self.has_painted:
+            cropped_paint = self.paint_pixmap.copy(crop_r)
             painter = QPainter(cropped_image)
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-            painter.drawPixmap(0, 0, cropped_overlay)
+            painter.drawPixmap(0, 0, cropped_paint)
             painter.end()
-        
-        # Update the image pixmap with the cropped version
         self.image_pixmap = cropped_image
-        
-        # Create new paint overlay for the cropped image
-        self.paint_overlay = QPixmap(cropped_image.size())
-        self.paint_overlay.fill(Qt.transparent)
+        self.image_item.setPixmap(self.image_pixmap)
+        self.paint_pixmap = QPixmap(cropped_image.size())
+        self.paint_pixmap.fill(Qt.transparent)
+        self.paint_item.setPixmap(self.paint_pixmap)
         self.has_painted = False
-        
-        # Clear crop selection and update display
-        self.clear_crop_selection()
-        self.update_display()
-        
+        if self.crop_active:
+            self.crop_rect = QRectF(0, 0, cropped_image.width(), cropped_image.height())
+            if self.crop_rect_item:
+                self.crop_rect_item.setRect(self.crop_rect)
+                self._update_crop_overlays()
         return True
-    
-    def draw_point(self, point):
-        """Draw a single point"""
-        if not self.paint_overlay or self.is_crop_mode:
+
+    def pick_color(self, scene_pos):
+        if not self.image_item:
             return
-            
-        # Convert screen coordinates to image coordinates
-        image_point = self.screen_to_image_coords(point)
-        if not image_point:
-            return
-            
-        painter = QPainter(self.paint_overlay)
-        painter.setPen(QPen(self.paint_color, self.brush_size, Qt.SolidLine, Qt.RoundCap))
-        painter.drawPoint(image_point)
-        painter.end()
-        
-        self.has_painted = True  # Mark that painting has occurred
-        self.update()
-    
-    def draw_line(self, start_point, end_point):
-        """Draw a line between two points"""
-        if not self.paint_overlay or self.is_crop_mode:
-            return
-            
-        # Convert screen coordinates to image coordinates
-        image_start = self.screen_to_image_coords(start_point)
-        image_end = self.screen_to_image_coords(end_point)
-        
-        if not image_start or not image_end:
-            return
-            
-        painter = QPainter(self.paint_overlay)
-        painter.setPen(QPen(self.paint_color, self.brush_size, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawLine(image_start, image_end)
-        painter.end()
-        
-        self.has_painted = True  # Mark that painting has occurred
-        self.update()
-    
-    def screen_to_image_coords(self, screen_point):
-        """Convert screen coordinates to image coordinates"""
-        if not self.image_rect or not self.image_pixmap or self.scale_factor <= 0:
-            return None
-            
-        x, y, w, h = self.image_rect
-        
-        # Check if point is within the displayed image bounds
-        if not (x <= screen_point.x() <= x + w and y <= screen_point.y() <= y + h):
-            return None
-        
-        # Calculate relative position within the displayed image
-        rel_x = screen_point.x() - x
-        rel_y = screen_point.y() - y
-        
-        # Convert to original image coordinates with bounds checking
-        try:
-            orig_x = int(rel_x / self.scale_factor)
-            orig_y = int(rel_y / self.scale_factor)
-            
-            # Ensure coordinates are within image bounds
-            orig_x = max(0, min(orig_x, self.image_pixmap.width() - 1))
-            orig_y = max(0, min(orig_y, self.image_pixmap.height() - 1))
-            
-            return QPoint(orig_x, orig_y)
-        except (ZeroDivisionError, OverflowError):
-            return None
-    
-    def image_to_screen_rect(self, image_rect):
-        """Convert image rectangle to screen coordinates"""
-        if not self.image_rect or not image_rect.isValid() or self.scale_factor <= 0:
-            return QRect()
-        
-        x, y, w, h = self.image_rect
-        
-        try:
-            # Convert image coordinates to screen coordinates
-            screen_x = x + int(image_rect.x() * self.scale_factor)
-            screen_y = y + int(image_rect.y() * self.scale_factor)
-            screen_w = int(image_rect.width() * self.scale_factor)
-            screen_h = int(image_rect.height() * self.scale_factor)
-            
-            return QRect(screen_x, screen_y, screen_w, screen_h)
-        except (OverflowError, ValueError):
-            return QRect()
-    
-    def pick_color(self, point):
-        """Pick color from the image at the given point"""
-        if not self.image_pixmap:
-            return
-            
-        image_point = self.screen_to_image_coords(point)
-        if not image_point:
-            return
-            
-        # Get color from the original image
-        color = self.image_pixmap.toImage().pixelColor(image_point.x(), image_point.y())
+        x = int(scene_pos.x())
+        y = int(scene_pos.y())
+        color = self.image_pixmap.toImage().pixelColor(x, y)
         if color.isValid():
             self.paint_color = color
-            # Emit signal or call parent method to update color display
             parent = self.parent()
             while parent and not hasattr(parent, 'update_color_display'):
                 parent = parent.parent()
-            if parent and hasattr(parent, 'update_color_display'):
+            if parent:
                 parent.update_color_display(color)
-    
+
+    def draw_point(self, point):
+        if not self.paint_pixmap:
+            return
+        painter = QPainter(self.paint_pixmap)
+        painter.setPen(QPen(self.paint_color, self.brush_size, Qt.SolidLine, Qt.RoundCap))
+        painter.drawPoint(point)
+        painter.end()
+        self.paint_item.setPixmap(self.paint_pixmap)
+        self.has_painted = True
+
+    def draw_line(self, start, end):
+        if not self.paint_pixmap:
+            return
+        painter = QPainter(self.paint_pixmap)
+        painter.setPen(QPen(self.paint_color, self.brush_size, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(start, end)
+        painter.end()
+        self.paint_item.setPixmap(self.paint_pixmap)
+        self.has_painted = True
+
     def clear_paint(self):
-        """Clear all paint marks"""
-        if self.paint_overlay:
-            self.paint_overlay.fill(Qt.transparent)
-            self.has_painted = False  # Reset paint flag
-            self.update()
-    
+        if self.paint_pixmap:
+            self.paint_pixmap.fill(Qt.transparent)
+            self.paint_item.setPixmap(self.paint_pixmap)
+        self.has_painted = False
+
+    def has_paint_marks(self):
+        return self.has_painted
+
     def get_combined_image(self):
-        """Get the original image combined with paint overlay"""
-        if not self.image_pixmap or not self.paint_overlay:
+        if not self.image_pixmap or not self.paint_pixmap:
             return self.image_pixmap
-        
-        # Create a copy of the original image
-        combined = QPixmap(self.image_pixmap)
-        
-        # Paint the overlay on top
+        combined = self.image_pixmap.copy()
         painter = QPainter(combined)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        painter.drawPixmap(0, 0, self.paint_overlay)
+        painter.drawPixmap(0, 0, self.paint_pixmap)
         painter.end()
-        
         return combined
-    
-    def has_paint_marks(self):
-        """Check if there are any paint marks on the overlay"""
-        return self.has_painted
-    
+
     def set_paint_color(self, color):
-        """Set the paint color"""
         self.paint_color = color
-    
+
     def set_brush_size(self, size):
-        """Set the brush size"""
-        self.brush_size = size
-    
+        self.brush_size = max(1, size)
+
+    def _create_crop_overlays(self):
+        gray_color = QColor(128, 128, 128, 128)
+        no_pen = QPen(Qt.NoPen)
+        brush = QBrush(gray_color)
+
+        def make_overlay():
+            overlay = QGraphicsRectItem()
+            overlay.setZValue(1)
+            overlay.setBrush(brush)
+            overlay.setPen(no_pen)
+            overlay.setFlag(QGraphicsItem.ItemIsMovable, False)
+            overlay.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            overlay.setAcceptHoverEvents(False)
+            self.scene.addItem(overlay)
+            return overlay
+
+        self.top_overlay = make_overlay()
+        self.bottom_overlay = make_overlay()
+        self.left_overlay = make_overlay()
+        self.right_overlay = make_overlay()
+
+    def _update_crop_overlays(self):
+        if not self.image_item or not self.crop_rect_item:
+            return
+        img_w = float(self.image_item.pixmap().width())
+        img_h = float(self.image_item.pixmap().height())
+        crop = self.crop_rect
+
+        # Top overlay
+        self.top_overlay.setRect(QRectF(0, 0, img_w, crop.top()))
+
+        # Bottom overlay
+        self.bottom_overlay.setRect(QRectF(0, crop.bottom(), img_w, img_h - crop.bottom()))
+
+        # Left overlay
+        self.left_overlay.setRect(QRectF(0, crop.top(), crop.left(), crop.height()))
+
+        # Right overlay
+        self.right_overlay.setRect(QRectF(crop.right(), crop.top(), img_w - crop.right(), crop.height()))
+
     def set_dropper_mode(self, active):
-        """Set dropper tool active/inactive"""
-        self.is_dropper_active = active
+        self.dropper_active = active
         if active:
-            self.setCursor(Qt.CrossCursor)
-            self.is_crop_mode = False  # Disable crop mode
-        else:
-            self.setCursor(Qt.ArrowCursor)
-    
-    def set_crop_mode(self, active):
-        """Set crop mode active/inactive"""
-        self.is_crop_mode = active
-        if active:
-            self.setCursor(Qt.ArrowCursor)
-            self.is_dropper_active = False  # Disable dropper mode
-            self.initialize_crop_selection()  # Start with full image selected
-        else:
-            self.setCursor(Qt.ArrowCursor)
+            self.crop_active = False
             self.clear_crop_selection()
-    
-    def has_crop_selection_ready(self):
-        """Check if there's a valid crop selection"""
-        if not self.has_crop_selection or not self.crop_rect.isValid():
-            return False
-        
-        # Check if crop selection is different from the full image
-        if not self.image_pixmap:
-            return False
-        
-        full_rect = QRect(0, 0, self.image_pixmap.width(), self.image_pixmap.height())
-        return self.crop_rect != full_rect
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        else:
+            if not self.crop_active:
+                self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
