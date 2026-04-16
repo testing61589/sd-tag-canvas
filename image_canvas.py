@@ -150,6 +150,7 @@ class CropRectItem(QGraphicsRectItem):
 
 class ImageCanvas(QGraphicsView):
     zoom_changed = Signal(float)
+    image_needs_save_changed = Signal(bool)
 
     def __init__(self):
         print("ImageCanvas __init__")
@@ -175,6 +176,8 @@ class ImageCanvas(QGraphicsView):
         self.is_painting = False
         self.dropper_active = False
         self.crop_active = False
+        self.original_image_size = None
+        self._needs_image_save = False
         self.has_painted = False
         self.last_point = QPointF()
         self.crop_rect_item = None
@@ -209,7 +212,9 @@ class ImageCanvas(QGraphicsView):
             self.paint_pixmap.fill(Qt.transparent)
             self.paint_item = self.scene.addPixmap(self.paint_pixmap)
 
+            self.original_image_size = self.image_pixmap.size()
             self.has_painted = False
+            self._update_needs_image_save()
             self.clear_crop_selection()
             self.no_image_text.setVisible(False)
 
@@ -250,6 +255,7 @@ class ImageCanvas(QGraphicsView):
         self.image_pixmap = None
         self.paint_pixmap = None
         self.has_painted = False
+        self._update_needs_image_save()
         self.zoom_factor = DEFAULT_ZOOM_FACTOR
         self.no_image_text.setVisible(True)
         self.fit_zoom_factor = 1.0
@@ -488,6 +494,7 @@ class ImageCanvas(QGraphicsView):
         self.paint_pixmap.fill(Qt.transparent)
         self.paint_item.setPixmap(self.paint_pixmap)
         self.has_painted = False
+        self._update_needs_image_save()
         if self.crop_active:
             self.crop_rect = QRectF(0, 0, cropped_image.width(), cropped_image.height())
             if self.crop_rect_item:
@@ -518,6 +525,7 @@ class ImageCanvas(QGraphicsView):
         painter.end()
         self.paint_item.setPixmap(self.paint_pixmap)
         self.has_painted = True
+        self._update_needs_image_save()
 
     def draw_line(self, start, end):
         if not self.paint_pixmap:
@@ -528,12 +536,27 @@ class ImageCanvas(QGraphicsView):
         painter.end()
         self.paint_item.setPixmap(self.paint_pixmap)
         self.has_painted = True
+        self._update_needs_image_save()
 
     def clear_paint(self):
         if self.paint_pixmap:
             self.paint_pixmap.fill(Qt.transparent)
             self.paint_item.setPixmap(self.paint_pixmap)
         self.has_painted = False
+        self._update_needs_image_save()
+
+    def needs_image_save(self):
+        """Returns True if image has unsaved modifications (paint or crop)"""
+        return self._needs_image_save
+
+    def _update_needs_image_save(self):
+        if not self.image_pixmap:
+            self._needs_image_save = False
+        else:
+            orig_size = self.original_image_size
+            curr_size = self.image_pixmap.size()
+            self._needs_image_save = self.has_painted or (orig_size is not None and orig_size != curr_size)
+        self.image_needs_save_changed.emit(self._needs_image_save)
 
     def has_paint_marks(self):
         return self.has_painted

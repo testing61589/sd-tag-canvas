@@ -31,6 +31,8 @@ class ImageTagEditor(QMainWindow):
         self.image_extensions = IMAGE_EXTENSIONS
         self.thumbnail_mode = THUMBNAIL_MODE_ENABLED
         self.current_paint_color = QColor(*DEFAULT_PAINT_COLOR)
+        self.original_tags_content = ""
+        self.save_changes_btn = None  # Will be renamed
         
         self.init_ui()
         self.setup_connections()
@@ -397,10 +399,10 @@ class ImageTagEditor(QMainWindow):
         layout.addWidget(self.tags_edit)
         
         # Save tags button
-        self.save_tags_btn = QPushButton("Save Tags")
-        self.save_tags_btn.setEnabled(False)
-        self.save_tags_btn.clicked.connect(self.save_tags)
-        layout.addWidget(self.save_tags_btn)
+        self.save_changes_btn = QPushButton("Save Changes")
+        self.save_changes_btn.setEnabled(False)
+        self.save_changes_btn.clicked.connect(self.save_changes)
+        layout.addWidget(self.save_changes_btn)
     
     def choose_color(self):
         """Open color chooser dialog"""
@@ -534,9 +536,14 @@ class ImageTagEditor(QMainWindow):
         self.image_list.itemClicked.connect(self.on_image_selected)
         self.tags_edit.textChanged.connect(self.on_tags_changed)
         self.tags_edit.textChanged.connect(self.auto_resize_text_edit)
-        
+        self.tags_edit.textChanged.connect(self.update_unsaved_status)
+
         # Connect zoom signal
         self.image_canvas.zoom_changed.connect(self.update_zoom_display)
+
+        # Connect image needs save signal if available
+        if hasattr(self.image_canvas, 'image_needs_save_changed'):
+            self.image_canvas.image_needs_save_changed.connect(self.update_unsaved_status)
         
     def open_folder(self):
         """Open folder dialog and load selected folder"""
@@ -659,7 +666,7 @@ class ImageTagEditor(QMainWindow):
             self.tags_edit.clear()
             self._disable_zoom_controls()
             self.tags_edit.setEnabled(False)
-            self.save_tags_btn.setEnabled(False)
+            self.save_changes_btn.setEnabled(False)
             self.delete_btn.setEnabled(False)
             self.duplicate_btn.setEnabled(False)
             self.current_image_path = None
@@ -692,7 +699,6 @@ class ImageTagEditor(QMainWindow):
 
         # Enable tags editing
         self.tags_edit.setEnabled(True)
-        self.save_tags_btn.setEnabled(True)
         self.delete_btn.setEnabled(True)
         self.duplicate_btn.setEnabled(True)
 
@@ -729,7 +735,7 @@ class ImageTagEditor(QMainWindow):
             
     def load_tags(self, image_path):
         tags_file = image_path.with_suffix('.txt')
-        
+
         try:
             if tags_file.exists():
                 with open(tags_file, 'r', encoding='utf-8') as f:
@@ -737,42 +743,99 @@ class ImageTagEditor(QMainWindow):
                     self.tags_edit.setPlainText(tags_content)
             else:
                 self.tags_edit.setPlainText("")
-            
+
+            self.original_tags_content = self.tags_edit.toPlainText().strip()
             self.auto_resize_text_edit()
+            self.update_unsaved_status()
         except Exception as e:
             QMessageBox.warning(
-                self, "Error", 
+                self, "Error",
                 f"Failed to load tags file: {str(e)}"
             )
             self.tags_edit.setPlainText("")
+            self.original_tags_content = ""
+            self.update_unsaved_status()
             
-    def save_tags(self):
-        """Save tags and edited image if there are paint marks or crops"""
+    def save_changes(self):
+        """Save changes to tags and image."""
         if not self.current_image_path:
             return
-            
+
         # Save tags
         tags_content = self.tags_edit.toPlainText().strip()
         tags_file = self.current_image_path.with_suffix('.txt')
-        
-        try:
-            tags_msg = self._save_tags_file(tags_content, tags_file)
-            image_msg = self._save_image_if_modified()
-            
-            # Combine status messages
-            if image_msg:
-                self.statusBar().showMessage(f"{tags_msg} + {image_msg}")
-            else:
-                self.statusBar().showMessage(tags_msg)
+        tags_msg = self._save_tags_file(tags_content, tags_file)
+        self.original_tags_content = tags_content
 
-            self.refresh_image_list()
-                
-        except Exception as e:
-            print(f"Error during save: {str(e)}")
-            QMessageBox.critical(
-                self, "Error", 
-                f"Failed to save: {str(e)}"
-            )
+        # Save image if needed
+        image_msg = None
+        if hasattr(self.image_canvas, 'needs_image_save') and self.image_canvas.needs_image_save():
+            pixmap = self.image_canvas.get_combined_image() if self.image_canvas.has_painted else self.image_canvas.image_pixmap
+            if self._save_image_pixmap(pixmap):
+                self.image_canvas.set_image(self.current_image_path)
+                image_msg = "Image saved"
+            else:
+                image_msg = "Failed to save image"
+
+        # Status message
+        if image_msg:
+            self.statusBar().showMessage(f"{tags_msg}, {image_msg}")
+        else:
+            self.statusBar().showMessage(tags_msg)
+
+        self.update_unsaved_status()
+
+    def has_unsaved_changes(self):
+        """Check if there are unsaved changes to tags or image."""
+        if not self.current_image_path:
+            return False
+        current_tags = self.tags_edit.toPlainText().strip()
+        image_needs_save = getattr(self.image_canvas, 'needs_image_save', lambda: False)()
+        return current_tags != self.original_tags_content or image_needs_save
+
+    def update_unsaved_status(self):
+        """Update save button enabled state based on unsaved changes."""
+        self.save_changes_btn.setEnabled(self.has_unsaved_changes())
+
+    def navigate_to_image(self, row):
+        """Navigate to the image at the given row index."""
+        self.image_list.setCurrentRow(row)
+        item = self.image_list.item(row)
+        if item:
+            self.on_image_selected(item)
+
+    def prompt_save_before_navigate(self, key):
+        """Prompt user to save changes before navigating."""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setWindowTitle("Unsaved Changes")
+        msg_box.setText("You have unsaved changes.")
+        msg_box.setInformativeText("Do you want to save them before navigating?")
+
+        save_btn = msg_box.addButton("&Save", QMessageBox.YesRole)
+        discard_btn = msg_box.addButton("&Discard", QMessageBox.NoRole)
+        cancel_btn = msg_box.addButton(QMessageBox.Cancel)
+
+        msg_box.setDefaultButton(save_btn)
+        msg_box.exec()
+
+        clicked = msg_box.clickedButton()
+        if clicked == save_btn:
+            self.save_changes()
+            return True
+        elif clicked == discard_btn:
+            self.discard_changes()
+            return True
+        else:
+            return False
+
+    def discard_changes(self):
+        """Discard unsaved changes by reloading original state."""
+        if self.current_image_path:
+            self.load_tags(self.current_image_path)
+            if hasattr(self.image_canvas, 'set_image'):
+                self.image_canvas.set_image(self.current_image_path)
+        self.update_unsaved_status()
     
     def _save_tags_file(self, tags_content, tags_file):
         """Save tags to file and return status message"""
@@ -937,14 +1000,14 @@ class ImageTagEditor(QMainWindow):
             self.tags_edit.clear()
             self._disable_zoom_controls()
             self.tags_edit.setEnabled(False)
-            self.save_tags_btn.setEnabled(False)
+            self.save_changes_btn.setEnabled(False)
             self.delete_btn.setEnabled(False)
             self.duplicate_btn.setEnabled(False)
             self.current_image_path = None
             self.statusBar().showMessage("No more images in folder")
 
     def on_tags_changed(self):
-        pass
+        self.update_unsaved_status()
             
     def eventFilter(self, obj, event):
         """Global event filter to capture arrow keys for navigation and delete key"""
@@ -955,8 +1018,9 @@ class ImageTagEditor(QMainWindow):
                 return True
             elif event.key() == Qt.Key_Up or event.key() == Qt.Key_Down:
                 if self.image_list.count() > 0:
-                    if self.current_image_path:
-                        self.save_tags()
+                    if self.has_unsaved_changes():
+                        if not self.prompt_save_before_navigate(event.key()):
+                            return True  # Cancel navigation
                     
                     current_row = self.image_list.currentRow()
                     
@@ -968,10 +1032,7 @@ class ImageTagEditor(QMainWindow):
                         new_row = min(self.image_list.count() - 1, current_row + 1)
                     
                     if new_row != current_row:
-                        self.image_list.setCurrentRow(new_row)
-                        new_item = self.image_list.item(new_row)
-                        if new_item:
-                            self.on_image_selected(new_item)
+                        self.navigate_to_image(new_row)
                 
                 return True
         
