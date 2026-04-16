@@ -6,19 +6,20 @@ from pathlib import Path
 import shutil
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QListWidget, QLabel, QTextEdit, QPushButton, QFileDialog,
+    QListWidget, QLabel, QCheckBox, QTextEdit, QPushButton, QFileDialog,
     QSplitter, QMessageBox, QListWidgetItem, QColorDialog,
-    QSlider, QFrame, QApplication, QScrollArea
+    QSlider, QFrame, QApplication, QScrollArea, QListView
 )
-from PySide6.QtCore import Qt, QTimer, QEvent
-from PySide6.QtGui import QFont, QAction, QTextOption, QColor
+from PySide6.QtCore import Qt, QTimer, QEvent, QSize
+from PySide6.QtGui import QFont, QAction, QTextOption, QColor, QIcon, QPixmap
 
 from image_canvas import ImageCanvas
 from config import (
     IMAGE_EXTENSIONS, DEFAULT_PAINT_COLOR, LEFT_PANEL_MIN_WIDTH,
     LEFT_PANEL_DEFAULT_WIDTH, RIGHT_PANEL_DEFAULT_WIDTH, 
     TAGS_EDITOR_MIN_HEIGHT, TAGS_EDITOR_MAX_HEIGHT,
-    PAINT_TOOLS_MAX_HEIGHT, JPEG_QUALITY, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE
+    PAINT_TOOLS_MAX_HEIGHT, JPEG_QUALITY, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE,
+    THUMBNAIL_SIZE, THUMBNAIL_MODE_ENABLED
 )
 
 
@@ -28,6 +29,7 @@ class ImageTagEditor(QMainWindow):
         self.current_folder = None
         self.current_image_path = None
         self.image_extensions = IMAGE_EXTENSIONS
+        self.thumbnail_mode = THUMBNAIL_MODE_ENABLED
         self.current_paint_color = QColor(*DEFAULT_PAINT_COLOR)
         
         self.init_ui()
@@ -131,6 +133,12 @@ class ImageTagEditor(QMainWindow):
         fit_window_action.triggered.connect(self.fit_to_window)
         view_menu.addAction(fit_window_action)
         
+    def toggle_thumbnail_mode(self, checked):
+        """Toggle thumbnail mode and refresh image list"""
+        self.thumbnail_mode = checked
+        if self.current_folder:
+            self.refresh_image_list()
+
     def create_left_panel(self, parent):
         # Left panel container
         left_widget = QWidget()
@@ -145,10 +153,17 @@ class ImageTagEditor(QMainWindow):
         self.open_folder_btn = QPushButton("Open Folder")
         self.open_folder_btn.clicked.connect(self.open_folder)
         left_layout.addWidget(self.open_folder_btn)
-        
+
+        # Thumbnail mode checkbox
+        self.thumbnail_checkbox = QCheckBox("Thumbnail View")
+        self.thumbnail_checkbox.setChecked(self.thumbnail_mode)
+        self.thumbnail_checkbox.toggled.connect(self.toggle_thumbnail_mode)
+        left_layout.addWidget(self.thumbnail_checkbox)
+
         # Image list
         self.image_list = QListWidget()
         self.image_list.setMinimumWidth(LEFT_PANEL_MIN_WIDTH)
+        self.image_list.setSelectionMode(QListWidget.SingleSelection)
         left_layout.addWidget(self.image_list)
         
         parent.addWidget(left_widget)
@@ -161,6 +176,11 @@ class ImageTagEditor(QMainWindow):
         right_layout.setSpacing(5)
         
         # Image display area (QGraphicsView handles scrolling)
+        self.filename_label = QLabel("No image selected")
+        self.filename_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.filename_label.setStyleSheet("color: #ddd; border-bottom: 1px solid #555;")
+        right_layout.addWidget(self.filename_label)
+
         self.image_canvas = ImageCanvas()
         right_layout.addWidget(self.image_canvas, 1)  # Stretch to fill available space
         
@@ -543,25 +563,62 @@ class ImageTagEditor(QMainWindow):
             
     def load_images(self):
         self.image_list.clear()
-        
+
         if not self.current_folder:
             return
-            
+        
+        if self.thumbnail_mode:
+            # Icon (thumbnail) mode settings
+            self.image_list.setWrapping(True)
+            self.image_list.setWordWrap(True)
+            self.image_list.setTextElideMode(Qt.ElideRight)
+            self.image_list.setViewMode(QListWidget.IconMode)
+            self.image_list.setResizeMode(QListView.Adjust)
+            self.image_list.setFlow(QListView.LeftToRight)
+            self.image_list.setSpacing(4)
+            self.image_list.setUniformItemSizes(True)
+            self.image_list.setGridSize(QSize(70, 120))
+            self.image_list.setIconSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
+        else:
+            # List mode settings
+            self.image_list.setViewMode(QListWidget.ListMode)
+            self.image_list.setWrapping(False)
+            self.image_list.setWordWrap(False)
+            self.image_list.setTextElideMode(Qt.ElideRight)
+            self.image_list.setResizeMode(QListView.Adjust)
+            self.image_list.setFlow(QListView.TopToBottom)
+            self.image_list.setSpacing(0)
+            self.image_list.setGridSize(QSize())
+            self.image_list.setUniformItemSizes(True)
+            self.image_list.setIconSize(QSize(0, 0))
+
         # Find all image files in the folder
         image_files = []
         for file_path in self.current_folder.iterdir():
             if file_path.is_file() and file_path.suffix.lower() in self.image_extensions:
                 image_files.append(file_path)
-                
+
         # Sort files by name
         image_files.sort(key=lambda x: x.name.lower())
-        
+
         # Add to list widget
         for image_path in image_files:
             item = QListWidgetItem(image_path.name)
             item.setData(Qt.UserRole, str(image_path))
+            if self.thumbnail_mode:
+                try:
+                    pixmap = QPixmap(str(image_path)).scaled(THUMBNAIL_SIZE, THUMBNAIL_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    item.setIcon(QIcon(pixmap))
+                except Exception:
+                    pass  # Skip invalid images
+                item.setTextAlignment(Qt.AlignHCenter)
+                item.setSizeHint(QSize(THUMBNAIL_SIZE + 20, 120))
+            else:
+                item.setIcon(QIcon())
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                item.setSizeHint(QSize(250, 20))
             self.image_list.addItem(item)
-            
+
         # Select the first image if any images were found
         if image_files:
             self.image_list.setCurrentRow(0)
@@ -569,36 +626,70 @@ class ImageTagEditor(QMainWindow):
             if first_item:
                 self.on_image_selected(first_item)
         else:
+            self.filename_label.setText("No image files found")
             self.statusBar().showMessage("No image files found in the selected folder")
-            
+
         if image_files:
             QTimer.singleShot(3000, lambda: self.statusBar().showMessage(
                 f"Found {len(image_files)} image files - Use ↑/↓ keys to navigate, Ctrl+wheel to zoom"
             ))
         
+    def refresh_image_list(self):
+        """Refresh the image list and try to preserve current selection if image still exists."""
+        current_path = self.current_image_path
+        self.load_images()
+
+        if current_path and current_path.exists():
+            for i in range(self.image_list.count()):
+                item = self.image_list.item(i)
+                if Path(item.data(Qt.UserRole)) == current_path:
+                    self.image_list.setCurrentRow(i)
+                    self.on_image_selected(item)
+                    return
+
+        # Select first image if available
+        if self.image_list.count() > 0:
+            self.image_list.setCurrentRow(0)
+            self.on_image_selected(self.image_list.item(0))
+        else:
+            # No images left
+            self.image_canvas._clear_image_data()
+            self.filename_label.setText("No image selected")
+            self.image_canvas.update()
+            self.tags_edit.clear()
+            self._disable_zoom_controls()
+            self.tags_edit.setEnabled(False)
+            self.save_tags_btn.setEnabled(False)
+            self.delete_btn.setEnabled(False)
+            self.duplicate_btn.setEnabled(False)
+            self.current_image_path = None
+            self.statusBar().showMessage("No more images in folder")
+
     def on_image_selected(self, item):
         image_path = Path(item.data(Qt.UserRole))
         self.current_image_path = image_path
-        
+        self.filename_label.setText(image_path.name)
+
         # Display image in canvas
         success = self.image_canvas.set_image(image_path)
         self.image_canvas.fit_to_window()  # Ensure fit after layout
         if not success:
+            self.filename_label.setText(f"Failed to load: {image_path.name}")
             self.statusBar().showMessage(f"Failed to load image: {image_path.name}")
             self._disable_zoom_controls()
             return
-        
+
         # Enable zoom controls
         self._enable_zoom_controls()
-        
+
         # Reset crop mode when switching images
         if self.crop_btn.isChecked():
             self.crop_btn.setChecked(False)
             self.toggle_crop_mode(False)
-        
+
         # Load and display tags
         self.load_tags(image_path)
-        
+
         # Enable tags editing
         self.tags_edit.setEnabled(True)
         self.save_tags_btn.setEnabled(True)
@@ -673,6 +764,8 @@ class ImageTagEditor(QMainWindow):
                 self.statusBar().showMessage(f"{tags_msg} + {image_msg}")
             else:
                 self.statusBar().showMessage(tags_msg)
+
+            self.refresh_image_list()
                 
         except Exception as e:
             print(f"Error during save: {str(e)}")
@@ -767,15 +860,7 @@ class ImageTagEditor(QMainWindow):
             self.statusBar().showMessage(f"Duplicated '{self.current_image_path.name}' -> '{duplicate_image_path.name}'")
 
             # Reload the images list and select the duplicate
-            self.load_images()
-
-            # Find and select the duplicate in the list
-            for i in range(self.image_list.count()):
-                item = self.image_list.item(i)
-                if item.data(Qt.UserRole) == str(duplicate_image_path):
-                    self.image_list.setCurrentRow(i)
-                    self.on_image_selected(item)
-                    break
+            self.refresh_image_list()
 
         except Exception as e:
             QMessageBox.critical(
@@ -814,8 +899,7 @@ class ImageTagEditor(QMainWindow):
                     shutil.move(str(tag_file), str(deleted_tag_path))
 
                 # Update UI
-                self._handle_image_deleted()
-
+                self.refresh_image_list()
                 self.statusBar().showMessage(f"Moved '{self.current_image_path.name}' to .deleted folder")
 
             except Exception as e:
@@ -848,6 +932,7 @@ class ImageTagEditor(QMainWindow):
         else:
             # No images left
             self.image_canvas._clear_image_data()
+            self.filename_label.setText("No image selected")
             self.image_canvas.update()
             self.tags_edit.clear()
             self._disable_zoom_controls()
