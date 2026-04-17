@@ -221,3 +221,4 @@ Desktop.ini
 # Claude
 CLAUDE.md
 .claude/*
+.spec-workflow/*
