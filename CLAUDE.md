@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+
+## Agent Guidelines
+
+Before finishing a solution and handing off manual testing to the user, always verify syntax:
+```bash
+python -m py_compile image_canvas.py main_window.py
+```
+
 ## Commands
 
 ### Running the Application

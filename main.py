@@ -4,11 +4,27 @@ Main entry point for the Image Tag Editor application.
 
 import sys
 import argparse
+import traceback
 from pathlib import Path
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from main_window import ImageTagEditor
 from config import APP_NAME, APP_VERSION
+
+
+def excepthook(exctype, value, tb):
+    """Custom exception hook to print full stack traces"""
+    print(f"\n{'='*60}")
+    print(f"Unhandled exception occurred!")
+    print(f"{'='*60}")
+    traceback.print_exception(exctype, value, tb)
+    print(f"{'='*60}\n")
+
+
+def qt_error_handler(exctype, value, tb):
+    """Handle uncaught Qt exceptions - calls sys.excepthook"""
+    excepthook(exctype, value, tb)
+    sys.exit(1)
 
 
 def parse_arguments():
@@ -68,13 +84,16 @@ def validate_folder_path(folder_path):
 def main():
     """Main application entry point"""
     app = QApplication(sys.argv)
-    
+
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
+
+    # Enable unhandled exception logging inside Qt
+    sys.excepthook = qt_error_handler
     
     # Parse command line arguments
     args = parse_arguments()
-    
+
     # Validate folder path if provided
     initial_folder = None
     if args.folder:
@@ -82,18 +101,23 @@ def main():
         if error_msg:
             # Show error dialog and continue with no initial folder
             QMessageBox.warning(
-                None, 
-                "Folder Error", 
+                None,
+                "Folder Error",
                 f"Could not open the specified folder:\n\n{error_msg}\n\n"
                 "The application will start without opening a folder."
             )
         else:
             initial_folder = folder_path
-    
+
     # Create and show main window
-    window = ImageTagEditor(initial_folder=initial_folder)
-    window.show()
-    
+    try:
+        window = ImageTagEditor(initial_folder=initial_folder)
+        window.show()
+    except Exception as e:
+        print(f"FATAL: Failed to initialize UI: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
     sys.exit(app.exec())
 
 

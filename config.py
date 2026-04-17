@@ -44,3 +44,8 @@ APP_VERSION = "1.3"
 # Thumbnail settings
 THUMBNAIL_SIZE = 50
 THUMBNAIL_MODE_ENABLED = True
+
+# Trigger words UI
+TRIGGER_WORD_BUTTON_WIDTH = 100
+TRIGGER_WORD_BUTTON_HEIGHT = 25
+BASE_TRIGGER_COLOR = (65, 105, 255)  # Red matching paint color theme

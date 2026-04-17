@@ -8,18 +8,20 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QLabel, QCheckBox, QTextEdit, QPushButton, QFileDialog,
     QSplitter, QMessageBox, QListWidgetItem, QColorDialog,
-    QSlider, QFrame, QApplication, QScrollArea, QListView
+    QSlider, QFrame, QApplication, QScrollArea, QListView, QInputDialog,
+    QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer, QEvent, QSize
-from PySide6.QtGui import QFont, QAction, QTextOption, QColor, QIcon, QPixmap
+from PySide6.QtGui import QFont, QAction, QTextOption, QColor, QIcon, QPixmap, QTextCursor, QTextCharFormat
 
 from image_canvas import ImageCanvas
 from config import (
     IMAGE_EXTENSIONS, DEFAULT_PAINT_COLOR, LEFT_PANEL_MIN_WIDTH,
-    LEFT_PANEL_DEFAULT_WIDTH, RIGHT_PANEL_DEFAULT_WIDTH, 
+    LEFT_PANEL_DEFAULT_WIDTH, RIGHT_PANEL_DEFAULT_WIDTH,
     TAGS_EDITOR_MIN_HEIGHT, TAGS_EDITOR_MAX_HEIGHT,
     PAINT_TOOLS_MAX_HEIGHT, JPEG_QUALITY, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE,
-    THUMBNAIL_SIZE, THUMBNAIL_MODE_ENABLED
+    THUMBNAIL_SIZE, THUMBNAIL_MODE_ENABLED,
+    TRIGGER_WORD_BUTTON_WIDTH, TRIGGER_WORD_BUTTON_HEIGHT, BASE_TRIGGER_COLOR
 )
 
 
@@ -33,6 +35,11 @@ class ImageTagEditor(QMainWindow):
         self.current_paint_color = QColor(*DEFAULT_PAINT_COLOR)
         self.original_tags_content = ""
         self.save_changes_btn = None  # Will be renamed
+
+        # Trigger words
+        self.trigger_words = []
+        self.trigger_words_container = None
+        self._highlighting = False  # Re-entrancy guard
         
         self.init_ui()
         self.setup_connections()
@@ -188,7 +195,10 @@ class ImageTagEditor(QMainWindow):
         
         # Paint tools section - moved between image and tags
         self.create_paint_tools(right_layout)
-        
+
+        # Trigger words section - above tags
+        self.create_trigger_words_section(right_layout)
+
         # Tags section - moved to bottom
         self.create_tags_section(right_layout)
         
@@ -383,12 +393,35 @@ class ImageTagEditor(QMainWindow):
         zoom_percentage = self.image_canvas.get_zoom_percentage()
         self.zoom_label.setText(f"{zoom_percentage}%")
     
+    def create_trigger_words_section(self, layout):
+        """Create trigger words section above tags"""
+        try:
+            # Trigger words container with horizontal flow
+            self.trigger_words_container = QWidget()
+            trigger_layout = QHBoxLayout(self.trigger_words_container)
+            trigger_layout.setContentsMargins(0, 0, 0, 0)
+            trigger_layout.setSpacing(8)
+            trigger_layout.setAlignment(Qt.AlignLeft)
+
+            # Add to main layout
+            layout.addWidget(self.trigger_words_container)
+            layout.addSpacing(4)
+
+            # Load and create buttons
+            if self.current_folder:
+                self.load_trigger_words()
+                self.refresh_trigger_words_ui()
+        except Exception as e:
+            self.statusBar().showMessage(f"Error creating trigger words section: {e}")
+            import traceback
+            traceback.print_exc()
+
     def create_tags_section(self, layout):
         """Create the tags editing section"""
         tags_label = QLabel("Tags:")
         tags_label.setFont(QFont("Arial", 10, QFont.Bold))
         layout.addWidget(tags_label)
-        
+
         # Tags text edit
         self.tags_edit = QTextEdit()
         self.tags_edit.setMinimumHeight(TAGS_EDITOR_MIN_HEIGHT)
@@ -397,7 +430,7 @@ class ImageTagEditor(QMainWindow):
         self.tags_edit.setEnabled(False)
         self.tags_edit.setWordWrapMode(QTextOption.WordWrap)
         layout.addWidget(self.tags_edit)
-        
+
         # Save tags button
         self.save_changes_btn = QPushButton("Save Changes")
         self.save_changes_btn.setEnabled(False)
@@ -558,6 +591,11 @@ class ImageTagEditor(QMainWindow):
         """Open a specific folder path (used for both dialog and command line)"""
         try:
             self.current_folder = Path(folder_path)
+
+            # Load trigger words first so they're available for tag highlighting
+            self.load_trigger_words()
+            self.refresh_trigger_words_ui()
+
             self.load_images()
             self.statusBar().showMessage(f"Loaded folder: {folder_path}")
         except Exception as e:
@@ -677,6 +715,9 @@ class ImageTagEditor(QMainWindow):
         self.current_image_path = image_path
         self.filename_label.setText(image_path.name)
 
+        # Unload old tags first
+        self._unload_tags()
+
         # Display image in canvas
         success = self.image_canvas.set_image(image_path)
         self.image_canvas.fit_to_window()  # Ensure fit after layout
@@ -725,6 +766,18 @@ class ImageTagEditor(QMainWindow):
         self.fit_window_btn.setEnabled(False)
         self.zoom_label.setText("—")
             
+    def _unload_tags(self):
+        """Unload current tags before loading new ones."""
+        self.tags_edit.blockSignals(True)
+        plain_format = QTextCharFormat()
+        plain_format.setBackground(QColor())  # Default/transparent
+        cursor = QTextCursor(self.tags_edit.document())
+        cursor.select(QTextCursor.Document)
+        cursor.mergeCharFormat(plain_format)
+        self.tags_edit.clear()
+        self.tags_edit.blockSignals(False)
+        self.original_tags_content = ""
+
     def auto_resize_text_edit(self):
         """Auto-resize the text edit based on content"""
         doc_height = self.tags_edit.document().size().height()
@@ -732,11 +785,13 @@ class ImageTagEditor(QMainWindow):
         new_height = int(doc_height + padding)
         new_height = max(TAGS_EDITOR_MIN_HEIGHT, min(TAGS_EDITOR_MAX_HEIGHT, new_height))
         self.tags_edit.setFixedHeight(new_height)
-            
+
     def load_tags(self, image_path):
         tags_file = image_path.with_suffix('.txt')
 
         try:
+            # Block signals while loading tags to avoid recursive highlighting
+            self.tags_edit.blockSignals(True)
             if tags_file.exists():
                 with open(tags_file, 'r', encoding='utf-8') as f:
                     tags_content = f.read().strip()
@@ -747,6 +802,8 @@ class ImageTagEditor(QMainWindow):
             self.original_tags_content = self.tags_edit.toPlainText().strip()
             self.auto_resize_text_edit()
             self.update_unsaved_status()
+            self.highlight_trigger_words()
+            self.tags_edit.blockSignals(False)
         except Exception as e:
             QMessageBox.warning(
                 self, "Error",
@@ -850,6 +907,165 @@ class ImageTagEditor(QMainWindow):
             else:
                 return "No tags to save"
     
+
+    # Trigger words methods
+    def load_trigger_words(self):
+        """Load trigger words from _triggerwords.txt in current folder"""
+        if not self.current_folder:
+            self.trigger_words = []
+            return
+
+        triggers_path = self.current_folder / "_triggerwords.txt"
+
+        if not triggers_path.exists():
+            self.trigger_words = []
+            return
+
+        try:
+            with open(triggers_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Parse comma and newline separated values
+            words = []
+            for line in content.splitlines():
+                for word in line.split(','):
+                    word = word.strip()
+                    if word:
+                        words.append(word)
+
+            self.trigger_words = words
+        except Exception as e:
+            self.statusBar().showMessage(f"Error loading trigger words: {e}")
+            print(f"Error loading trigger words: {e}")
+            import traceback
+            traceback.print_exc()
+            self.trigger_words = []
+
+    def refresh_trigger_words_ui(self):
+        """Refresh trigger word buttons"""
+        if not self.trigger_words_container:
+            return
+
+        layout = self.trigger_words_container.layout()
+        if not layout:
+            return
+
+        # Clear existing widgets
+        button_height = TRIGGER_WORD_BUTTON_HEIGHT
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        # Build trigger word colors map (lowercase key for case-insensitive matching)
+        self.trigger_word_colors = {}
+
+        for i, word in enumerate(self.trigger_words):
+            btn = QPushButton(word)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda checked, w=word: self.on_trigger_word_clicked(w))
+
+            # Base colors
+            base_r, base_g, base_b = BASE_TRIGGER_COLOR
+            button_height = TRIGGER_WORD_BUTTON_HEIGHT
+
+            # Progressively darker shade: each word gets 10% darker
+            shade_factor = max(0.40, 1.0 - (i * 0.10))  # Down to 40% brightness
+            r = int(base_r * shade_factor)
+            g = int(base_g * shade_factor)
+            b = int(base_b * shade_factor)
+
+            # Store color for this trigger word
+            self.trigger_word_colors[word.strip().lower()] = QColor(r, g, b)
+
+            # Disable automatic sizing - let stylesheet control
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+            # Style with minimal padding for tight fit
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: rgb({r}, {g}, {b});
+                    border: 1px solid #333;
+                    border-radius: {button_height // 2}px;
+                    color: white;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 2px 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgb({min(255, r+30)}, {min(255, g+30)}, {min(255, b+30)});
+                }}
+            """)
+            layout.addWidget(btn)
+
+        # Add "Add" button
+        add_btn = QPushButton("+ Add Trigger Word")
+        add_btn.clicked.connect(self.add_trigger_word)
+        add_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #444;
+                border: 1px solid #333;
+                border-radius: {button_height // 2}px;
+                color: white;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 4px 8px;
+            }}
+            QPushButton:hover {{
+                background-color: #555;
+            }}
+        """)
+        layout.addWidget(add_btn)
+
+    def on_trigger_word_clicked(self, trigger_word):
+        """Add trigger word to front of comma-separated tags"""
+        try:
+            current_tags = self.tags_edit.toPlainText().strip()
+            if current_tags:
+                # Add trigger word with comma separator at the front
+                new_tags = f"{trigger_word}, {current_tags}"
+            else:
+                new_tags = trigger_word
+
+            # Insert at beginning and keep cursor at start for easy editing
+            self.tags_edit.setPlainText(new_tags)
+            self.tags_edit.moveCursor(QTextCursor.Start)
+            self.update_unsaved_status()
+        except Exception as e:
+            import traceback
+            print(f"Error adding trigger word '{trigger_word}': {e}")
+            traceback.print_exc()
+
+    def add_trigger_word(self):
+        """Prompt user to add a new trigger word"""
+        word, ok = QInputDialog.getText(
+            self,
+            "Add Trigger Word",
+            "Enter new trigger word:"
+        )
+
+        if ok and word.strip():
+            self.trigger_words.append(word.strip())
+
+            # Save to _triggerwords.txt
+            triggers_path = self.current_folder / "_triggerwords.txt"
+            try:
+                with open(triggers_path, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(self.trigger_words))
+
+                # Refresh UI
+                self.refresh_trigger_words_ui()
+                self.statusBar().showMessage(f"Added trigger word: {word.strip()}")
+            except Exception as e:
+                self.statusBar().showMessage(f"Failed to save trigger words: {e}")
+                import traceback
+                traceback.print_exc()
+                QMessageBox.warning(self, "Error", f"Failed to save trigger words: {e}")
+
+    #
+
     def _save_image_if_modified(self):
         """Save image if it has been modified and return status message"""
         # Save edited image if there are paint marks
@@ -1008,7 +1224,81 @@ class ImageTagEditor(QMainWindow):
 
     def on_tags_changed(self):
         self.update_unsaved_status()
-            
+        self.highlight_trigger_words()
+
+    def _clear_all_formats(self):
+        """Clear all formatting and reset to widget's background color."""
+        cursor = QTextCursor(self.tags_edit.document())
+        plain_format = QTextCharFormat()
+        plain_format.setBackground(self.tags_edit.palette().color(self.tags_edit.backgroundRole()))
+        cursor.select(QTextCursor.Document)
+        cursor.mergeCharFormat(plain_format)
+
+    def highlight_trigger_words(self):
+        """Highlight trigger words in the tags field by applying per-tag colors."""
+        # Re-entrancy guard
+        if self._highlighting:
+            return
+        self._highlighting = True
+
+        try:
+            # Block textChanged signal to prevent infinite loop
+            self.tags_edit.blockSignals(True)
+
+            if not self.trigger_words:
+                self._clear_all_formats()
+                return
+
+            text = self.tags_edit.document().toPlainText()
+            if not text.strip():
+                self._clear_all_formats()
+                return
+
+            # Clear existing formats first
+            cursor = QTextCursor(self.tags_edit.document())
+            plain_format = QTextCharFormat()
+            plain_format.setBackground(QColor())  # Default/transparent  # Reset to white background
+            cursor.select(QTextCursor.Document)
+            cursor.mergeCharFormat(plain_format)
+
+            # Apply highlight colors based on trigger_word_colors map
+            # Process tags in text order - only split on commas, preserving spaces within tags
+            cursor.setPosition(0)
+            i = 0
+            while i < len(text):
+                # Skip leading commas and whitespace
+                while i < len(text) and text[i] in ', \t\n\r':
+                    i += 1
+
+                if i >= len(text):
+                    break
+
+                tag_start = i
+                # Only stop at commas; preserve spaces within tags (e.g., "red dress")
+                while i < len(text) and text[i] != ',':
+                    i += 1
+
+                tag_end = i
+                tag = text[tag_start:tag_end]
+                tag_lower = tag.strip().lower()
+
+                # Check if this tag matches a trigger word
+                if tag_lower in self.trigger_word_colors:
+                    color = self.trigger_word_colors[tag_lower]
+                    cursor.setPosition(tag_start)
+                    cursor.setPosition(tag_end, QTextCursor.KeepAnchor)
+                    highlight_format = QTextCharFormat()
+                    highlight_format.setBackground(color)
+                    cursor.setCharFormat(highlight_format)
+
+        except Exception as e:
+            self.statusBar().showMessage(f"Error highlighting trigger words: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._highlighting = False
+            self.tags_edit.blockSignals(False)
+
     def eventFilter(self, obj, event):
         """Global event filter to capture arrow keys for navigation and delete key"""
         if event.type() == QEvent.KeyPress:
